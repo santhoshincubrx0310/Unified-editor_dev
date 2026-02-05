@@ -1,0 +1,299 @@
+/* ============================= */
+/* GLOBAL */
+/* ============================= */
+
+body {
+  margin: 0;
+  font-family: Inter, Arial, sans-serif;
+  background: linear-gradient(180deg, #0c1022 0%, #0a0f1c 100%);
+  color: #e6e9f0;
+  overflow: hidden;
+}
+
+button {
+  border: none;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+button {
+  background: #2563eb;
+  color: white;
+}
+
+button:hover {
+  background: #1e4fd8;
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+/* ============================= */
+/* APP LAYOUT */
+/* ============================= */
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ============================= */
+/* HEADER */
+/* ============================= */
+
+.header {
+  padding: 16px 30px;
+  background: rgba(20, 28, 55, 0.6);
+  backdrop-filter: blur(8px);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.header-right {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+}
+
+.save-status {
+  font-size: 13px;
+  color: #22c55e;
+}
+
+.delete-btn {
+  background: #dc2626;
+}
+
+.delete-btn:hover {
+  background: #b91c1c;
+}
+
+/* ============================= */
+/* PREVIEW */
+/* ============================= */
+
+.preview-area {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+}
+
+/* ============================= */
+/* DIVIDER */
+/* ============================= */
+
+.divider {
+  height: 6px;
+  cursor: row-resize;
+  background: transparent;
+}
+
+.divider:hover {
+  background: rgba(255,255,255,0.05);
+}
+
+/* ============================= */
+/* TRACK CONTROLS */
+/* ============================= */
+
+.track-controls {
+  padding: 12px 30px;
+  display: flex;
+  gap: 10px;
+  background: rgba(20, 28, 55, 0.4);
+}
+
+/* ============================= */
+/* TIMELINE */
+/* ============================= */
+
+.timeline-container {
+  height: 220px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 10px 0;
+  display: flex;
+  justify-content: center;  
+}
+
+.timeline-inner {
+  position: relative;
+  margin: 0 auto;
+}
+
+.timeline-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  justify-content: center;   
+}
+
+/* ============================= */
+/* RULER */
+/* ============================= */
+
+.timeline-ruler {
+  position: relative;
+  height: 25px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255,255,255,0.2);
+}
+
+.tick.minor {
+  height: 6px;
+}
+
+.tick.major {
+  height: 12px;
+  background: #3b82f6;
+}
+
+.tick-label {
+  position: absolute;
+  bottom: 18px;
+  font-size: 11px;
+  color: #94a3b8;
+  transform: translateX(-50%);
+}
+
+/* ============================= */
+/* TRACK LANES - CLEAN DESIGN */
+/* ============================= */
+
+.track-lane {
+  position: relative;
+  height: 50px;
+  background: rgba(30, 40, 80, 0.4);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.track-lane:hover {
+  background: rgba(30, 40, 80, 0.5);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Track label - subtle, on the left */
+.lane-label {
+  position: absolute;
+  left: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.5px;
+  width: 60px;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+}
+
+.lane-content {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  margin-left: 70px; /* Space for label */
+  margin-right: 50px; /* Space for + button */
+}
+
+.lane-add-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  padding: 0;
+  transition: all 0.2s;
+}
+
+.lane-add-btn:hover {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: rgba(59, 130, 246, 0.5);
+  transform: translateY(-50%) scale(1.05);
+}
+
+/* ============================= */
+/* CLIPS */
+/* ============================= */
+
+.clip {
+  position: absolute;
+  height: 40px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: white;
+  cursor: grab;
+  transition: all 0.2s ease;
+}
+
+.clip:hover {
+  filter: brightness(1.1);
+}
+
+.clip:active {
+  cursor: grabbing;
+}
+
+.clip.selected {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+/* ============================= */
+/* PLAYHEAD - Full height through all tracks */
+/* ============================= */
+
+
+
+/* ============================= */
+/* SCROLLBAR */
+/* ============================= */
+
+.timeline-container::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.timeline-container::-webkit-scrollbar-track {
+  background: #0f0f1e;
+}
+
+.timeline-container::-webkit-scrollbar-thumb {
+  background: #2a2a4a;
+  border-radius: 6px;
+}
+
+.timeline-container::-webkit-scrollbar-thumb:hover {
+  background: #3a3a5a;
+}
