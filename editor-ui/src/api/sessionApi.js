@@ -1,80 +1,90 @@
-const BASE_URL = "http://localhost:8083";
+// src/api/sessionApi.js
+//
+// API client for the editor backend.
+//
+// Key design decisions:
+//   - createSession() only sends content_id — never user_id
+//   - user_id is handled by the API gateway (X-User-ID header)
+//   - All errors are thrown so callers can handle them properly
+//   - BASE_URL from env — works across dev/staging/production without code changes
 
-// Create session
-export async function createSession(userId, contentId) {
-  const response = await fetch(`${BASE_URL}/sessions`, {
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8083/api/v1"
+const DEV_USER_ID = "11111111-1111-1111-1111-111111111111"
+
+
+// createSession: creates or retrieves an existing session for this content.
+// Backend uses FindOrCreate — safe to call on every page load without creating orphans.
+export async function createSession(contentId) {
+  const res = await fetch(`${BASE_URL}/sessions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json","X-User-ID": DEV_USER_ID },
     body: JSON.stringify({
-      user_id: userId,
       content_id: contentId,
+      // No user_id here — comes from X-User-ID header injected by API gateway
     }),
-  });
+  })
 
-  if (!response.ok) {
-    throw new Error("Failed to create session");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "unknown error" }))
+    throw new Error(err.error || `createSession failed: ${res.status}`)
   }
 
-  return response.json();
+  return res.json()
 }
 
-// Get session
-export async function getSession(sessionId) {
-  const response = await fetch(`${BASE_URL}/sessions/${sessionId}`);
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch session");
-  }
-
-  return response.json();
-}
-
-// Save session
+// saveSession: persists the current timeline state.
 export async function saveSession(sessionId, timeline) {
-  const response = await fetch(`${BASE_URL}/sessions/${sessionId}`, {
+  const res = await fetch(`${BASE_URL}/sessions/${sessionId}`, {
     method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      timeline,
-    }),
-  });
+    headers: { "Content-Type": "application/json","X-User-ID": DEV_USER_ID },
+    body: JSON.stringify({ timeline }),
+  })
 
-  if (!response.ok) {
-    throw new Error("Failed to save session");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "unknown error" }))
+    throw new Error(err.error || `saveSession failed: ${res.status}`)
   }
 
-  return response.json();
+  return res.json()
 }
 
-// Delete session
+// deleteSession: permanently removes the session.
 export async function deleteSession(sessionId) {
-  const response = await fetch(`${BASE_URL}/sessions/${sessionId}`, {
+  const res = await fetch(`${BASE_URL}/sessions/${sessionId}`, {
     method: "DELETE",
-  });
+    headers: {
+  "X-User-ID": DEV_USER_ID,   
+},
 
-  if (!response.ok) {
-    throw new Error("Failed to delete session");
+  }
+)
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "unknown error" }))
+    throw new Error(err.error || `deleteSession failed: ${res.status}`)
   }
 
-  return response.json();
+  return res.json()
 }
-export async function uploadFile(file) {
-  const formData = new FormData();
-  formData.append("file", file);
 
-  const response = await fetch("http://localhost:8083/upload", {
+// uploadFile: uploads a media file and returns its URL.
+export async function uploadFile(file) {
+  const formData = new FormData()
+  formData.append("file", file)
+
+  const res = await fetch(`${BASE_URL}/upload`, {
     method: "POST",
     body: formData,
-  });
+    headers: {
+  "X-User-ID": DEV_USER_ID,   
+},
 
-  if (!response.ok) {
-    throw new Error("Upload failed");
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "unknown error" }))
+    throw new Error(err.error || `uploadFile failed: ${res.status}`)
   }
 
-  return response.json();
+  return res.json() // { file_url: "..." }
 }
-

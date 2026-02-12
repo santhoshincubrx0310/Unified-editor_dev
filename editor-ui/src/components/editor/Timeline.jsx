@@ -1,30 +1,60 @@
-import { useEditorStore } from "../../store/editorStore";
-import Clip from "./Clip";
+// src/components/editor/Timeline.jsx
+import { useEditorStore } from "../../store/editorStore"
+import Clip from "./Clip"
+import { useRef } from "react"
 
 export default function Timeline({ onTrackAdd }) {
-  const timeline = useEditorStore((s) => s.timeline);
-  const setPlayhead = useEditorStore((s) => s.setPlayhead);
+  const timeline = useEditorStore((s) => s.timeline)
+  const setPlayhead = useEditorStore((s) => s.setPlayhead)
+  const selectClip = useEditorStore((s) => s.selectClip)
+  
+  const timelineRef = useRef(null)
 
-  const timelineWidth = timeline.duration * timeline.zoom_level;
+  const timelineWidth = timeline.duration * timeline.zoom_level
+
+  const handlePlayheadDrag = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    
+    const container = timelineRef.current.parentElement
+    const containerRect = container.getBoundingClientRect()
+    const scrollLeft = container.scrollLeft || 0
+    
+    const handleMouseMove = (moveEvent) => {
+      const x = moveEvent.clientX - containerRect.left + scrollLeft
+      const newTime = Math.max(0, Math.min(x / timeline.zoom_level, timeline.duration))
+      setPlayhead(newTime)
+    }
+
+    const handleMouseUp = () => {
+      document.removeEventListener("mousemove", handleMouseMove)
+      document.removeEventListener("mouseup", handleMouseUp)
+    }
+
+    document.addEventListener("mousemove", handleMouseMove)
+    document.addEventListener("mouseup", handleMouseUp)
+  }
 
   const handleClick = (e) => {
     if (e.target.classList.contains('timeline-inner') || 
         e.target.classList.contains('timeline-ruler') ||
-        e.target.classList.contains('tick')) {
-      const rect = e.currentTarget.getBoundingClientRect();
-      const scrollLeft = e.currentTarget.scrollLeft || 0;
-      const clickX = e.clientX - rect.left + scrollLeft;
-      const newTime = Math.floor(clickX / timeline.zoom_level);
-      setPlayhead(newTime);
+        e.target.classList.contains('tick') ||
+        e.target.classList.contains('lane-content')) {
+      const container = timelineRef.current.parentElement
+      const rect = container.getBoundingClientRect()
+      const scrollLeft = container.scrollLeft || 0
+      const clickX = e.clientX - rect.left + scrollLeft
+      const newTime = Math.max(0, Math.min(clickX / timeline.zoom_level, timeline.duration))
+      setPlayhead(newTime)
+      selectClip(null)
     }
-  };
-
-  const ticks = [];
-  for (let i = 0; i <= timeline.duration; i++) {
-    ticks.push(i);
   }
 
-  // Professional track styling based on type
+  const ticks = []
+  for (let i = 0; i <= timeline.duration; i++) {
+    ticks.push(i)
+  }
+
   const getTrackConfig = (type) => {
     switch(type) {
       case 'video':
@@ -42,8 +72,8 @@ export default function Timeline({ onTrackAdd }) {
       case 'text':
         return {
           height: '65px',
-          background: 'linear-gradient(to bottom, rgba(60, 45, 30, 0.6), rgba(50, 35, 20, 0.6))',
-          border: '1px solid rgba(200, 120, 50, 0.15)'
+          background: 'linear-gradient(to bottom, rgba(30, 45, 60, 0.6), rgba(20, 35, 50, 0.6))',
+          border: '1px solid rgba(34, 211, 238, 0.15)'
         }
       default:
         return {
@@ -52,7 +82,7 @@ export default function Timeline({ onTrackAdd }) {
           border: '1px solid rgba(255, 255, 255, 0.05)'
         }
     }
-  };
+  }
 
   return (
     <div style={{
@@ -63,6 +93,8 @@ export default function Timeline({ onTrackAdd }) {
       position: 'relative'
     }}>
       <div
+        ref={timelineRef}
+        className="timeline-inner"
         style={{
           width: timelineWidth,
           minWidth: '100%',
@@ -73,18 +105,19 @@ export default function Timeline({ onTrackAdd }) {
         onClick={handleClick}
       >
         {/* Ruler */}
-        <div style={{
+        <div className="timeline-ruler" style={{
           position: 'sticky',
           top: 0,
           height: '32px',
           background: 'rgba(15, 20, 35, 0.95)',
-          borderBottom: '2px solid rgba(100, 120, 255, 0.2)',
+          borderBottom: '2px solid rgba(34, 211, 238, 0.3)',
           zIndex: 10,
           marginBottom: '12px'
         }}>
           {ticks.map((t) => (
             <div
               key={t}
+              className="tick"
               style={{
                 position: 'absolute',
                 left: t * timeline.zoom_level,
@@ -107,7 +140,7 @@ export default function Timeline({ onTrackAdd }) {
                   <div style={{
                     width: '2px',
                     height: '14px',
-                    background: 'rgba(100, 120, 255, 0.4)'
+                    background: 'rgba(34, 211, 238, 0.4)'
                   }} />
                 </>
               )}
@@ -129,7 +162,8 @@ export default function Timeline({ onTrackAdd }) {
           flexDirection: 'column',
           gap: '10px',
           paddingLeft: '10px',
-          paddingRight: '60px'
+          paddingRight: '60px',
+          position: 'relative'
         }}>
           {timeline.tracks.length === 0 && (
             <div style={{
@@ -139,12 +173,12 @@ export default function Timeline({ onTrackAdd }) {
               fontSize: '15px',
               fontWeight: '500'
             }}>
-              Click buttons above to add Video, Audio, or Text tracks
+              Click buttons above to add tracks
             </div>
           )}
           
           {timeline.tracks.map((track) => {
-            const config = getTrackConfig(track.type);
+            const config = getTrackConfig(track.type)
             
             return (
               <div 
@@ -159,8 +193,7 @@ export default function Timeline({ onTrackAdd }) {
                   boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)'
                 }}
               >
-                {/* Track content area */}
-                <div style={{
+                <div className="lane-content" style={{
                   position: 'relative',
                   flex: 1,
                   height: '100%',
@@ -178,7 +211,7 @@ export default function Timeline({ onTrackAdd }) {
                       pointerEvents: 'none',
                       whiteSpace: 'nowrap'
                     }}>
-                      Empty {track.type} track - Click + to add content
+                      Empty {track.type} track
                     </div>
                   )}
                   
@@ -192,7 +225,6 @@ export default function Timeline({ onTrackAdd }) {
                   ))}
                 </div>
 
-                {/* Add button */}
                 <button
                   style={{
                     position: 'absolute',
@@ -213,61 +245,64 @@ export default function Timeline({ onTrackAdd }) {
                     padding: 0,
                     cursor: 'pointer',
                     transition: 'all 0.2s',
-                    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)'
+                    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
+                    zIndex: 5
                   }}
                   onClick={(e) => {
-                    e.stopPropagation();
-                    onTrackAdd(track.track_id, track.type);
+                    e.stopPropagation()
+                    onTrackAdd(track.track_id, track.type)
                   }}
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'rgba(59, 130, 246, 0.4)';
-                    e.currentTarget.style.transform = 'translateY(-50%) scale(1.05)';
-                    e.currentTarget.style.borderColor = 'rgba(59, 130, 246, 0.6)';
+                    e.currentTarget.style.background = 'rgba(59, 130, 246, 0.4)'
+                    e.currentTarget.style.transform = 'translateY(-50%) scale(1.05)'
                   }}
                   onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'rgba(59, 130, 246, 0.25)';
-                    e.currentTarget.style.transform = 'translateY(-50%) scale(1)';
-                    e.currentTarget.style.borderColor = 'rgba(59, 130, 246, 0.4)';
+                    e.currentTarget.style.background = 'rgba(59, 130, 246, 0.25)'
+                    e.currentTarget.style.transform = 'translateY(-50%) scale(1)'
                   }}
                 >
                   +
                 </button>
               </div>
-            );
+            )
           })}
-        </div>
 
-        {/* Playhead */}
-        {timeline.tracks.length > 0 && (
-          <div
-            style={{
-              position: 'absolute',
-              left: timeline.playhead_position * timeline.zoom_level,
-              top: '32px',
-              bottom: 0,
-              width: '2px',
-              background: 'linear-gradient(to bottom, #22d3ee, #0ea5e9)',
-              boxShadow: '0 0 12px rgba(34, 211, 238, 0.8), 0 0 4px rgba(34, 211, 238, 0.4)',
-              pointerEvents: 'none',
-              zIndex: 100
-            }}
-          >
-            {/* Playhead handle */}
-            <div style={{
-              position: 'absolute',
-              top: '-8px',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              width: '14px',
-              height: '14px',
-              background: '#22d3ee',
-              borderRadius: '50%',
-              border: '2px solid #0a0e1a',
-              boxShadow: '0 2px 6px rgba(0, 0, 0, 0.3)'
-            }} />
-          </div>
-        )}
+          {/* Playhead - ONLY IN TIMELINE AREA */}
+          {timeline.tracks.length > 0 && (
+            <div
+              onMouseDown={handlePlayheadDrag}
+              style={{
+                position: 'absolute',
+                left: timeline.playhead_position * timeline.zoom_level,
+                top: '-44px',
+                height: 'calc(100% + 44px)',
+                width: '2px',
+                background: '#22d3ee',
+                boxShadow: '0 0 8px rgba(34, 211, 238, 0.6)',
+                cursor: 'ew-resize',
+                zIndex: 100,
+                pointerEvents: 'auto'
+              }}
+            >
+              <div 
+                style={{
+                  position: 'absolute',
+                  top: '0',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  width: '12px',
+                  height: '12px',
+                  background: '#22d3ee',
+                  borderRadius: '50%',
+                  border: '2px solid white',
+                  boxShadow: '0 2px 6px rgba(34, 211, 238, 0.5)',
+                  cursor: 'grab'
+                }} 
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
-  );
+  )
 }
