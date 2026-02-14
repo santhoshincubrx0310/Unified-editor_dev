@@ -102,6 +102,7 @@ func main() {
 	api.HandleFunc("/sessions/{id}", editorHandler.SaveSession).Methods("PUT")
 	api.HandleFunc("/sessions/{id}", editorHandler.DeleteSession).Methods("DELETE")
 	api.HandleFunc("/upload", editorHandler.UploadFile).Methods("POST")
+	api.HandleFunc("/sessions/from-clip", editorHandler.CreateSessionFromClip).Methods("POST")
 
 	// Serve local uploads — in production, S3 serves files directly (this route unused)
 	r.PathPrefix("/uploads/").Handler(

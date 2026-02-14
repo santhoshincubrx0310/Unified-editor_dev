@@ -55,7 +55,7 @@ func (s *SessionService) FindOrCreateSession(userID, contentID uuid.UUID) (*mode
 func (s *SessionService) findExistingSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
 		SELECT session_id, user_id, content_id, timeline, version, status, created_at, updated_at
-		FROM editor_sessions_test
+		FROM editor_sessions
 		WHERE user_id = $1 AND content_id = $2
 		ORDER BY created_at DESC
 		LIMIT 1
@@ -90,7 +90,7 @@ func (s *SessionService) findExistingSession(ctx context.Context, userID, conten
 
 func (s *SessionService) createSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
-		INSERT INTO editor_sessions_test (user_id, content_id)
+		INSERT INTO editor_sessions (user_id, content_id)
 		VALUES ($1, $2)
 		RETURNING session_id, timeline, version, status, created_at, updated_at
 	`
@@ -129,7 +129,7 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 
 	query := `
 		SELECT session_id, user_id, content_id, timeline, version, status, created_at, updated_at
-		FROM editor_sessions_test
+		FROM editor_sessions
 		WHERE session_id = $1
 	`
 
@@ -177,7 +177,7 @@ func (s *SessionService) SaveSession(id uuid.UUID, timeline map[string]interface
 	}
 
 	query := `
-		UPDATE editor_sessions_test
+		UPDATE editor_sessions
 		SET timeline   = $1,
 		    version    = version + 1,
 		    updated_at = NOW()
@@ -203,6 +203,6 @@ func (s *SessionService) DeleteSession(id uuid.UUID) error {
 	defer cancel()
 
 	_, err := s.DB.ExecContext(ctx,
-		`DELETE FROM editor_sessions_test WHERE session_id = $1`, id)
+		`DELETE FROM editor_sessions WHERE session_id = $1`, id)
 	return err
 }

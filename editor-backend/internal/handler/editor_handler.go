@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 
+	"editor-backend/internal/validation"
+
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -177,45 +179,36 @@ func (h *EditorHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 
 // UploadFile handles media uploads with type validation and safe filenames.
 func (h *EditorHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
-	const maxUploadSize = 100 << 20 // 100MB
 
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-		respondError(w, http.StatusBadRequest, "file too large (max 100MB) or invalid form")
+	if err := r.ParseMultipartForm(validation.MaxFileSize); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	file, fileHeader, err := r.FormFile("file")
 	if err != nil {
-		respondError(w, http.StatusBadRequest, "missing file field in request")
+		respondError(w, http.StatusBadRequest, "missing file")
 		return
 	}
 	defer file.Close()
 
-	// Validate MIME type — reject anything that isn't video or audio
-	contentType := fileHeader.Header.Get("Content-Type")
-	allowedTypes := map[string]bool{
-		"video/mp4":       true,
-		"video/quicktime": true,
-		"video/webm":      true,
-		"audio/mpeg":      true,
-		"audio/mp4":       true,
-		"audio/wav":       true,
-		"audio/ogg":       true,
-	}
-	if !allowedTypes[contentType] {
-		respondError(w, http.StatusUnsupportedMediaType,
-			"unsupported file type: only video (mp4, mov, webm) and audio (mp3, m4a, wav, ogg) are allowed")
+	// production validation
+	if err := validation.ValidateUpload(fileHeader); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	contentType := fileHeader.Header.Get("Content-Type")
 
 	fileURL, err := h.Storage.Upload(file, fileHeader.Filename, contentType)
 	if err != nil {
-		log.Println("Upload error:", err)
-		respondError(w, http.StatusInternalServerError, "failed to store file")
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]string{"file_url": fileURL})
+	respondJSON(w, http.StatusOK, map[string]string{
+		"file_url": fileURL,
+	})
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -233,4 +226,86 @@ func respondJSON(w http.ResponseWriter, status int, data interface{}) {
 
 func respondError(w http.ResponseWriter, status int, message string) {
 	respondJSON(w, status, map[string]string{"error": message})
+}
+func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Request) {
+
+	var req struct {
+		ClipID   string  `json:"clip_id"`
+		ClipURL  string  `json:"clip_url"`
+		Duration float64 `json:"duration"`
+	}
+
+	// Decode request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate input
+	if req.ClipURL == "" {
+		respondError(w, http.StatusBadRequest, "clip_url is required")
+		return
+	}
+
+	if req.Duration <= 0 {
+		respondError(w, http.StatusBadRequest, "duration must be greater than 0")
+		return
+	}
+
+	// Get authenticated user
+	userID, err := getUserID(r)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid user")
+		return
+	}
+
+	// Generate new content ID for this clip session
+	contentID := uuid.New()
+
+	// Create session
+	session, err := h.Service.FindOrCreateSession(userID, contentID)
+	if err != nil {
+		log.Println("CreateSessionFromClip error:", err)
+		respondError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+
+	// Create timeline with clip preloaded
+	timeline := map[string]interface{}{
+		"duration": req.Duration,
+		"tracks": []interface{}{
+			map[string]interface{}{
+				"type":    "video",
+				"visible": true,
+				"muted":   false,
+				"clips": []interface{}{
+					map[string]interface{}{
+						"id":       req.ClipID,
+						"src":      req.ClipURL,
+						"start":    0,
+						"end":      req.Duration,
+						"duration": req.Duration,
+					},
+				},
+			},
+		},
+	}
+
+	// Save timeline
+	err = h.Service.SaveSession(session.SessionID, timeline)
+	if err != nil {
+		log.Println("SaveSession error:", err)
+		respondError(w, http.StatusInternalServerError, "failed to save session timeline")
+		return
+	}
+
+	// Fetch updated session with timeline
+	updatedSession, err := h.Service.GetSession(session.SessionID, userID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch updated session")
+		return
+	}
+
+	// Return updated session
+	respondJSON(w, http.StatusOK, updatedSession)
 }

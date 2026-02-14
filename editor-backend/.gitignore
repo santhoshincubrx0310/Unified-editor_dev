@@ -1,0 +1,20 @@
+# Environment files
+.env
+.env.*
+editor-backend/.env
+editor-ui/.env
+
+# uploads
+uploads/
+editor-backend/uploads/
+
+# node modules
+node_modules/
+
+# build files
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
