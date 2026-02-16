@@ -104,6 +104,10 @@ func main() {
 	api.HandleFunc("/upload", editorHandler.UploadFile).Methods("POST")
 	api.HandleFunc("/sessions/from-clip", editorHandler.CreateSessionFromClip).Methods("POST")
 
+	// Phase 2: Repurposer integration endpoints
+	api.HandleFunc("/highlight/create", editorHandler.CreateHighlightSession).Methods("POST")
+	api.HandleFunc("/export/{id}", editorHandler.ExportSession).Methods("POST")
+
 	// Serve local uploads — in production, S3 serves files directly (this route unused)
 	r.PathPrefix("/uploads/").Handler(
 		http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))),
@@ -130,7 +134,7 @@ func main() {
 	// This protects your service under load.
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8083"
+		port = "8087"
 	}
 
 	srv := &http.Server{

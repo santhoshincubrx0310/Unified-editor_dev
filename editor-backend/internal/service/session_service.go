@@ -52,9 +52,35 @@ func (s *SessionService) FindOrCreateSession(userID, contentID uuid.UUID) (*mode
 	return s.createSession(ctx, userID, contentID)
 }
 
+// FindOrCreateSessionWithSource creates or finds a session with repurposer source tracking.
+// Used by Phase 2 repurposer integration to link sessions to source clips and jobs.
+func (s *SessionService) FindOrCreateSessionWithSource(
+	userID, contentID uuid.UUID,
+	sourceAssetID, sourceJobID, sourceModule, platform string,
+) (*models.EditorSession, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Step 1: Look for existing session for this user + content
+	existing, err := s.findExistingSession(ctx, userID, contentID)
+	if err == nil {
+		// Found one — return it
+		return existing, nil
+	}
+	if !errors.Is(err, ErrSessionNotFound) {
+		// Unexpected DB error
+		return nil, err
+	}
+
+	// Step 2: No existing session — create one with source fields
+	return s.createSessionWithSource(ctx, userID, contentID, sourceAssetID, sourceJobID, sourceModule, platform)
+}
+
 func (s *SessionService) findExistingSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
-		SELECT session_id, user_id, content_id, timeline, version, status, created_at, updated_at
+		SELECT session_id, user_id, content_id, timeline, version, status,
+		       source_asset_id, source_job_id, source_module, platform,
+		       exported_asset_id, export_status, created_at, updated_at
 		FROM editor_sessions
 		WHERE user_id = $1 AND content_id = $2
 		ORDER BY created_at DESC
@@ -71,6 +97,12 @@ func (s *SessionService) findExistingSession(ctx context.Context, userID, conten
 		&timelineJSON,
 		&session.Version,
 		&session.Status,
+		&session.SourceAssetID,
+		&session.SourceJobID,
+		&session.SourceModule,
+		&session.Platform,
+		&session.ExportedAssetID,
+		&session.ExportStatus,
 		&session.CreatedAt,
 		&session.UpdatedAt,
 	)
@@ -92,7 +124,9 @@ func (s *SessionService) createSession(ctx context.Context, userID, contentID uu
 	query := `
 		INSERT INTO editor_sessions (user_id, content_id)
 		VALUES ($1, $2)
-		RETURNING session_id, timeline, version, status, created_at, updated_at
+		RETURNING session_id, timeline, version, status,
+		          source_asset_id, source_job_id, source_module, platform,
+		          exported_asset_id, export_status, created_at, updated_at
 	`
 
 	session := &models.EditorSession{
@@ -106,6 +140,62 @@ func (s *SessionService) createSession(ctx context.Context, userID, contentID uu
 		&timelineJSON,
 		&session.Version,
 		&session.Status,
+		&session.SourceAssetID,
+		&session.SourceJobID,
+		&session.SourceModule,
+		&session.Platform,
+		&session.ExportedAssetID,
+		&session.ExportStatus,
+		&session.CreatedAt,
+		&session.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(timelineJSON) > 0 {
+		json.Unmarshal(timelineJSON, &session.Timeline)
+	}
+
+	return session, nil
+}
+
+func (s *SessionService) createSessionWithSource(
+	ctx context.Context,
+	userID, contentID uuid.UUID,
+	sourceAssetID, sourceJobID, sourceModule, platform string,
+) (*models.EditorSession, error) {
+	query := `
+		INSERT INTO editor_sessions (
+			user_id, content_id, source_asset_id, source_job_id, source_module, platform
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING session_id, timeline, version, status,
+		          source_asset_id, source_job_id, source_module, platform,
+		          exported_asset_id, export_status, created_at, updated_at
+	`
+
+	session := &models.EditorSession{
+		UserID:        userID,
+		ContentID:     contentID,
+		SourceAssetID: sourceAssetID,
+		SourceJobID:   sourceJobID,
+		SourceModule:  sourceModule,
+		Platform:      platform,
+	}
+	var timelineJSON []byte
+
+	err := s.DB.QueryRowContext(ctx, query, userID, contentID, sourceAssetID, sourceJobID, sourceModule, platform).Scan(
+		&session.SessionID,
+		&timelineJSON,
+		&session.Version,
+		&session.Status,
+		&session.SourceAssetID,
+		&session.SourceJobID,
+		&session.SourceModule,
+		&session.Platform,
+		&session.ExportedAssetID,
+		&session.ExportStatus,
 		&session.CreatedAt,
 		&session.UpdatedAt,
 	)
@@ -128,7 +218,9 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 	defer cancel()
 
 	query := `
-		SELECT session_id, user_id, content_id, timeline, version, status, created_at, updated_at
+		SELECT session_id, user_id, content_id, timeline, version, status,
+		       source_asset_id, source_job_id, source_module, platform,
+		       exported_asset_id, export_status, created_at, updated_at
 		FROM editor_sessions
 		WHERE session_id = $1
 	`
@@ -143,6 +235,12 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 		&timelineJSON,
 		&session.Version,
 		&session.Status,
+		&session.SourceAssetID,
+		&session.SourceJobID,
+		&session.SourceModule,
+		&session.Platform,
+		&session.ExportedAssetID,
+		&session.ExportStatus,
 		&session.CreatedAt,
 		&session.UpdatedAt,
 	)
