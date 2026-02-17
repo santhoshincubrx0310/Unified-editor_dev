@@ -8,7 +8,7 @@
 //   - All errors are thrown so callers can handle them properly
 //   - BASE_URL from env — works across dev/staging/production without code changes
 
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8083/api/v1"
+const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8087/api/v1"
 const DEV_USER_ID = "11111111-1111-1111-1111-111111111111"
 
 

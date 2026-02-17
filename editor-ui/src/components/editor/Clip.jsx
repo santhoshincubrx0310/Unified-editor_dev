@@ -1,26 +1,33 @@
 // src/components/editor/Clip.jsx
 import { useEditorStore } from "../../store/editorStore"
+import { normalizeTimeline } from "../../utils/timelineUtils"
 import { useRef, useEffect, useState } from "react"
 
-export default function Clip({ clip, trackType, trackHeight }) {
-  const zoom = useEditorStore((s) => s.timeline.zoom_level)
+const SNAP_THRESHOLD = 10 // pixels
+const SNAP_DISTANCE = 0.2 // seconds
+
+export default function Clip({ clip, trackType, trackHeight, pixelsPerSecond }) {
+  const zoom = pixelsPerSecond || useEditorStore((s) => s.timeline.zoom_level)
+  const timeline = useEditorStore((s) => s.timeline)
   const moveClip = useEditorStore((s) => s.moveClip)
   const trimClipLeft = useEditorStore((s) => s.trimClipLeft)
   const trimClipRight = useEditorStore((s) => s.trimClipRight)
   const deleteClip = useEditorStore((s) => s.deleteClip)
   const selectedClipId = useEditorStore((s) => s.timeline.selectedClipId)
   const selectClip = useEditorStore((s) => s.selectClip)
+  const currentTime = useEditorStore((s) => s.currentTime)
 
   const isSelected = selectedClipId === clip.clip_id
   const dragMode = useRef(null)
   const startX = useRef(0)
   const startClipStart = useRef(0)
   const startClipEnd = useRef(0)
-  
-  const [filmstripUrl, setFilmstripUrl] = useState(null)
 
-  const clipLeft = clip.start * zoom
-  const clipWidth = (clip.end - clip.start) * zoom
+  const [filmstripUrl, setFilmstripUrl] = useState(null)
+  const [snapGuide, setSnapGuide] = useState(null)
+
+  const clipLeft = (clip.timelineStart ?? clip.start) * zoom
+  const clipWidth = (clip.duration ?? (clip.end - clip.start)) * zoom
   const clipHeightValue = trackHeight ? trackHeight - 8 : 60
 
   useEffect(() => {
@@ -75,6 +82,48 @@ export default function Clip({ clip, trackType, trackHeight }) {
     return () => { cancelled = true }
   }, [clip.src, clip.type, clipWidth, clipHeightValue])
 
+  // Get all snap points (other clips, playhead)
+  const getSnapPoints = () => {
+    const points = []
+
+    // Add playhead as snap point
+    points.push(currentTime)
+
+    // Add all other clips' normalized boundaries as snap points
+    for (const track of timeline.tracks) {
+      if (track.clips) {
+        const normalized = track.type === 'video'
+          ? normalizeTimeline(track.clips, timeline.transitions || [])
+          : track.clips.map(c => ({ ...c, timelineStart: c.start, timelineEnd: c.end }))
+
+        for (const otherClip of normalized) {
+          if (otherClip.clip_id !== clip.clip_id) {
+            points.push(otherClip.timelineStart)
+            points.push(otherClip.timelineEnd)
+          }
+        }
+      }
+    }
+
+    return points
+  }
+
+  const findSnapPoint = (targetTime) => {
+    const snapPoints = getSnapPoints()
+    let closestSnap = null
+    let minDistance = SNAP_DISTANCE
+
+    for (const point of snapPoints) {
+      const distance = Math.abs(targetTime - point)
+      if (distance < minDistance) {
+        minDistance = distance
+        closestSnap = point
+      }
+    }
+
+    return closestSnap
+  }
+
   const onMouseDown = (e, mode) => {
     e.preventDefault()
     e.stopPropagation()
@@ -87,18 +136,57 @@ export default function Clip({ clip, trackType, trackHeight }) {
     const handleMouseMove = (e) => {
       const deltaX = e.clientX - startX.current
       const deltaTime = deltaX / zoom
+      let newPosition = null
 
       if (mode === "move") {
-        moveClip(clip.clip_id, startClipStart.current + deltaTime)
+        let targetStart = startClipStart.current + deltaTime
+
+        // Check for snap points
+        const snapToStart = findSnapPoint(targetStart)
+        const clipDuration = clip.end - clip.start
+        const snapToEnd = findSnapPoint(targetStart + clipDuration)
+
+        if (snapToStart !== null) {
+          targetStart = snapToStart
+          setSnapGuide(snapToStart)
+        } else if (snapToEnd !== null) {
+          targetStart = snapToEnd - clipDuration
+          setSnapGuide(snapToEnd)
+        } else {
+          setSnapGuide(null)
+        }
+
+        moveClip(clip.clip_id, targetStart)
       } else if (mode === "trim-left") {
-        trimClipLeft(clip.clip_id, startClipStart.current + deltaTime)
+        let targetStart = startClipStart.current + deltaTime
+        const snapPoint = findSnapPoint(targetStart)
+
+        if (snapPoint !== null) {
+          targetStart = snapPoint
+          setSnapGuide(snapPoint)
+        } else {
+          setSnapGuide(null)
+        }
+
+        trimClipLeft(clip.clip_id, targetStart)
       } else if (mode === "trim-right") {
-        trimClipRight(clip.clip_id, startClipEnd.current + deltaTime)
+        let targetEnd = startClipEnd.current + deltaTime
+        const snapPoint = findSnapPoint(targetEnd)
+
+        if (snapPoint !== null) {
+          targetEnd = snapPoint
+          setSnapGuide(snapPoint)
+        } else {
+          setSnapGuide(null)
+        }
+
+        trimClipRight(clip.clip_id, targetEnd)
       }
     }
 
     const handleMouseUp = () => {
       dragMode.current = null
+      setSnapGuide(null)
       document.removeEventListener("mousemove", handleMouseMove)
       document.removeEventListener("mouseup", handleMouseUp)
     }
@@ -141,33 +229,51 @@ export default function Clip({ clip, trackType, trackHeight }) {
   }
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        left: `${clipLeft}px`,
-        top: '4px',
-        width: `${Math.max(clipWidth, 50)}px`,
-        height: `${clipHeightValue}px`,
-        ...getClipStyle(),
-        border: isSelected ? '2px solid #22d3ee' : '1px solid rgba(255,255,255,0.1)',
-        borderRadius: '6px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        cursor: 'grab',
-        userSelect: 'none',
-        overflow: 'hidden',
-        boxShadow: isSelected 
-          ? '0 0 0 3px rgba(34, 211, 238, 0.3), 0 4px 12px rgba(0, 0, 0, 0.4)'
-          : '0 2px 8px rgba(0, 0, 0, 0.3)',
-        zIndex: isSelected ? 20 : 10
-      }}
-      onClick={(e) => {
-        e.stopPropagation()
-        selectClip(clip.clip_id)
-      }}
-      onMouseDown={(e) => onMouseDown(e, "move")}
-    >
+    <>
+      {/* Snap Guide Line */}
+      {snapGuide !== null && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${snapGuide * zoom}px`,
+            top: '-10px',
+            bottom: '-10px',
+            width: '2px',
+            background: '#fbbf24',
+            boxShadow: '0 0 8px rgba(251, 191, 36, 0.6)',
+            zIndex: 50,
+            pointerEvents: 'none'
+          }}
+        />
+      )}
+
+      <div
+        style={{
+          position: "absolute",
+          left: `${clipLeft}px`,
+          top: '4px',
+          width: `${Math.max(clipWidth, 50)}px`,
+          height: `${clipHeightValue}px`,
+          ...getClipStyle(),
+          border: isSelected ? '2px solid #22d3ee' : '1px solid rgba(255,255,255,0.1)',
+          borderRadius: '6px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: dragMode.current ? 'grabbing' : 'grab',
+          userSelect: 'none',
+          overflow: 'hidden',
+          boxShadow: isSelected
+            ? '0 0 0 3px rgba(34, 211, 238, 0.3), 0 4px 12px rgba(0, 0, 0, 0.4)'
+            : '0 2px 8px rgba(0, 0, 0, 0.3)',
+          zIndex: isSelected ? 20 : 10
+        }}
+        onClick={(e) => {
+          e.stopPropagation()
+          selectClip(clip.clip_id)
+        }}
+        onMouseDown={(e) => onMouseDown(e, "move")}
+      >
       {clip.type === "video" && !filmstripUrl && (
         <div style={{ color: "rgba(255, 255, 255, 0.5)", fontSize: "11px", fontWeight: '500' }}>
           Loading...
@@ -236,24 +342,25 @@ export default function Clip({ clip, trackType, trackHeight }) {
         <div style={{ width: '2px', height: '24px', background: isSelected ? '#22d3ee' : 'rgba(255, 255, 255, 0.6)', borderRadius: '1px' }} />
       </div>
 
-      {clipWidth > 100 && (
-        <div style={{
-          position: 'absolute',
-          bottom: '6px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          fontSize: '10px',
-          color: 'white',
-          background: 'rgba(0, 0, 0, 0.7)',
-          padding: '3px 8px',
-          borderRadius: '4px',
-          fontWeight: '600',
-          pointerEvents: 'none',
-          whiteSpace: 'nowrap'
-        }}>
-          {(clip.end - clip.start).toFixed(1)}s
-        </div>
-      )}
-    </div>
+        {clipWidth > 100 && (
+          <div style={{
+            position: 'absolute',
+            bottom: '6px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            fontSize: '10px',
+            color: 'white',
+            background: 'rgba(0, 0, 0, 0.7)',
+            padding: '3px 8px',
+            borderRadius: '4px',
+            fontWeight: '600',
+            pointerEvents: 'none',
+            whiteSpace: 'nowrap'
+          }}>
+            {(clip.end - clip.start).toFixed(1)}s
+          </div>
+        )}
+      </div>
+    </>
   )
 }

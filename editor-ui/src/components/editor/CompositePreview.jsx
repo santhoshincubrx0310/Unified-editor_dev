@@ -1,21 +1,32 @@
 // src/components/editor/CompositePreview.jsx
 import { useRef, useEffect, useState } from "react"
 import { useEditorStore } from "../../store/editorStore"
+import { getClipAtTime, getTransitionBlend, getClipsByType } from "../../utils/playbackEngine"
+import { normalizeTimeline } from "../../utils/timelineUtils"
 
 export default function CompositePreview() {
   const timeline = useEditorStore((s) => s.timeline)
   const setPlayhead = useEditorStore((s) => s.setPlayhead)
   const updateClip = useEditorStore((s) => s.updateClip)
   const selectClip = useEditorStore((s) => s.selectClip)
+  const currentTime = useEditorStore((s) => s.currentTime)
+  const setCurrentTime = useEditorStore((s) => s.setCurrentTime)
   const playheadPosition = timeline.playhead_position
   const selectedClipId = timeline.selectedClipId
+  const transitions = timeline.transitions || []
   
   const canvasRef = useRef(null)
   const previewRef = useRef(null)
   const videoRefs = useRef({})
   const audioRefs = useRef({})
   const animationFrameRef = useRef(null)
-  
+
+  // Dual video layer refs for transitions
+  const videoLayerARef = useRef(null)
+  const videoLayerBRef = useRef(null)
+  const [activeTransition, setActiveTransition] = useState(null)
+  const [transitionProgress, setTransitionProgress] = useState(0)
+
   const [isPlaying, setIsPlaying] = useState(false)
   const [dragging, setDragging] = useState(null)
   const [resizing, setResizing] = useState(null)
@@ -24,92 +35,237 @@ export default function CompositePreview() {
   const PREVIEW_WIDTH = 1280
   const PREVIEW_HEIGHT = 720
 
-  const getAllVideoClips = () => {
-    return timeline.tracks
-      .filter(track => track.type === "video")
-      .flatMap(track => track.clips)
-      .sort((a, b) => a.start - b.start)
+  // Normalized clip helpers – single source of truth for timing
+  const getNormalizedVideoClips = () => {
+    return normalizeTimeline(getClipsByType(timeline.tracks, "video"), transitions)
   }
 
-  const getAllAudioClips = () => {
-    return timeline.tracks
-      .filter(track => track.type === "audio")
-      .flatMap(track => track.clips)
-      .sort((a, b) => a.start - b.start)
+  const getNormalizedAudioClips = () => {
+    return getClipsByType(timeline.tracks, "audio").map(clip => ({
+      ...clip,
+      timelineStart: clip.start,
+      timelineEnd: clip.end,
+      duration: clip.end - clip.start
+    }))
   }
 
-  const getAllTextClips = () => {
-    return timeline.tracks
-      .filter(track => track.type === "text")
-      .flatMap(track => track.clips)
-      .sort((a, b) => a.start - b.start)
-  }
-
-  const getClipAtTime = (clips, time) => {
-    return clips.find(clip => time >= clip.start && time < clip.end)
+  const getNormalizedTextClips = () => {
+    return getClipsByType(timeline.tracks, "text").map(clip => ({
+      ...clip,
+      timelineStart: clip.start,
+      timelineEnd: clip.end,
+      duration: clip.end - clip.start
+    }))
   }
 
   const getMediaTime = (clip, timelineTime) => {
     if (!clip) return 0
-    const timeIntoClip = timelineTime - clip.start
+    const timeIntoClip = timelineTime - clip.timelineStart
     const trimStart = clip.trim_start || 0
     const mediaTime = trimStart + timeIntoClip
     return Math.max(0, mediaTime)
   }
 
+  // Apply transition styles to video layers
+  const applyTransitionStyles = (type, progress, layerA, layerB) => {
+    if (!layerA || !layerB) return
+
+    // Reset styles first - use proper transform reset
+    layerA.style.opacity = '1'
+    layerB.style.opacity = '0'
+    layerA.style.transform = 'translateX(0) scale(1)'
+    layerB.style.transform = 'translateX(0) scale(1)'
+    layerA.style.filter = 'none'
+    layerB.style.filter = 'none'
+    layerA.style.transformOrigin = 'center center'
+    layerB.style.transformOrigin = 'center center'
+
+    switch (type) {
+      case 'fade':
+        // Video A fades out, Video B fades in
+        layerA.style.opacity = String(1 - progress)
+        layerB.style.opacity = String(progress)
+        break
+
+      case 'crossfade':
+        // Both visible, smooth crossfade
+        layerA.style.opacity = String(1 - progress)
+        layerB.style.opacity = String(progress)
+        break
+
+      case 'zoom':
+        // Video B scales up while fading in - contained within bounds
+        layerA.style.opacity = String(1 - progress)
+        layerB.style.opacity = String(progress)
+        layerB.style.transform = `scale(${1 + progress * 0.3})`
+        break
+
+      case 'slide-left':
+        // Video B slides from right, Video A slides to left - safe contained slide
+        layerA.style.transform = `translateX(${-progress * 100}%)`
+        layerB.style.transform = `translateX(${(1 - progress) * 100}%)`
+        layerB.style.opacity = '1'
+        break
+
+      case 'slide-right':
+        // Video B slides from left, Video A slides to right - safe contained slide
+        layerA.style.transform = `translateX(${progress * 100}%)`
+        layerB.style.transform = `translateX(${-(1 - progress) * 100}%)`
+        layerB.style.opacity = '1'
+        break
+
+      case 'blur':
+        // Both videos blur and crossfade
+        layerA.style.filter = `blur(${progress * 10}px)`
+        layerA.style.opacity = String(1 - progress)
+        layerB.style.filter = `blur(${(1 - progress) * 10}px)`
+        layerB.style.opacity = String(progress)
+        break
+
+      default:
+        // No transition
+        layerB.style.opacity = '0'
+        break
+    }
+  }
+
   const renderFrame = (timelineTime) => {
     const canvas = canvasRef.current
+    const layerA = videoLayerARef.current
+    const layerB = videoLayerBRef.current
+
     if (!canvas) return
 
+    const videoClips = getNormalizedVideoClips()
+    const { clip: activeVideo, nextClip, transition, isInTransition, transitionProgress: tProgress } =
+      getClipAtTime(videoClips, timelineTime, transitions)
+
+    // Update transition state
+    if (isInTransition && transition && nextClip) {
+      setActiveTransition(transition)
+      setTransitionProgress(tProgress)
+
+      // Use video layers for transition rendering
+      if (layerA && layerB) {
+        const videoElA = videoRefs.current[activeVideo.clip_id]
+        const videoElB = videoRefs.current[nextClip.clip_id]
+
+        if (videoElA && videoElB) {
+          // Update video sources
+          if (layerA.src !== videoElA.src) layerA.src = videoElA.src
+          if (layerB.src !== videoElB.src) layerB.src = videoElB.src
+
+          // Sync video times
+          const mediaTimeA = getMediaTime(activeVideo, timelineTime)
+          const mediaTimeB = getMediaTime(nextClip, timelineTime)
+
+          if (Math.abs(layerA.currentTime - mediaTimeA) > 0.1) {
+            layerA.currentTime = mediaTimeA
+          }
+          if (Math.abs(layerB.currentTime - mediaTimeB) > 0.1) {
+            layerB.currentTime = mediaTimeB
+          }
+
+          // Apply transition animations
+          applyTransitionStyles(transition.type, tProgress, layerA, layerB)
+
+          // Hide canvas during transition
+          canvas.style.opacity = '0'
+          if (layerA) layerA.style.display = 'block'
+          if (layerB) layerB.style.display = 'block'
+          return
+        }
+      }
+    } else {
+      setActiveTransition(null)
+      setTransitionProgress(0)
+
+      // Reset video layers with proper transform reset
+      if (layerA) {
+        layerA.style.opacity = '0'
+        layerA.style.display = 'none'
+        layerA.style.transform = 'translateX(0) scale(1)'
+        layerA.style.filter = 'none'
+      }
+      if (layerB) {
+        layerB.style.opacity = '0'
+        layerB.style.display = 'none'
+        layerB.style.transform = 'translateX(0) scale(1)'
+        layerB.style.filter = 'none'
+      }
+
+      // Show canvas for normal rendering
+      canvas.style.opacity = '1'
+    }
+
+    // Standard canvas rendering (non-transition)
     const ctx = canvas.getContext('2d')
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.fillStyle = '#000'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
-    const videoClips = getAllVideoClips()
-    const activeVideo = getClipAtTime(videoClips, timelineTime)
-
     if (activeVideo) {
       const videoEl = videoRefs.current[activeVideo.clip_id]
       if (videoEl && videoEl.readyState >= 2) {
-        const videoAspect = videoEl.videoWidth / videoEl.videoHeight
-        const canvasAspect = canvas.width / canvas.height
-
-        let drawWidth, drawHeight, drawX, drawY
-
-        if (videoAspect > canvasAspect) {
-          drawWidth = canvas.width
-          drawHeight = canvas.width / videoAspect
-          drawX = 0
-          drawY = (canvas.height - drawHeight) / 2
-        } else {
-          drawHeight = canvas.height
-          drawWidth = canvas.height * videoAspect
-          drawX = (canvas.width - drawWidth) / 2
-          drawY = 0
-        }
-
-        ctx.drawImage(videoEl, drawX, drawY, drawWidth, drawHeight)
+        drawVideoToCanvas(ctx, videoEl, canvas)
       }
     }
   }
 
+  const drawVideoToCanvas = (ctx, videoEl, canvas) => {
+    const videoAspect = videoEl.videoWidth / videoEl.videoHeight
+    const canvasAspect = canvas.width / canvas.height
+
+    let drawWidth, drawHeight, drawX, drawY
+
+    if (videoAspect > canvasAspect) {
+      drawWidth = canvas.width
+      drawHeight = canvas.width / videoAspect
+      drawX = 0
+      drawY = (canvas.height - drawHeight) / 2
+    } else {
+      drawHeight = canvas.height
+      drawWidth = canvas.height * videoAspect
+      drawX = (canvas.width - drawWidth) / 2
+      drawY = 0
+    }
+
+    ctx.drawImage(videoEl, drawX, drawY, drawWidth, drawHeight)
+  }
+
   useEffect(() => {
     if (isPlaying) return
-    
-    const videoClips = getAllVideoClips()
-    const activeVideo = getClipAtTime(videoClips, playheadPosition)
-    
+
+    const videoClips = getNormalizedVideoClips()
+    const { clip: activeVideo, nextClip } = getClipAtTime(videoClips, currentTime, transitions)
+
+    // Seek active video to correct position
     if (activeVideo) {
       const videoEl = videoRefs.current[activeVideo.clip_id]
       if (videoEl) {
-        const mediaTime = getMediaTime(activeVideo, playheadPosition)
-        videoEl.currentTime = mediaTime
+        const mediaTime = getMediaTime(activeVideo, currentTime)
+        if (Math.abs(videoEl.currentTime - mediaTime) > 0.1) {
+          videoEl.currentTime = mediaTime
+        }
       }
     }
-    
-    renderFrame(playheadPosition)
-  }, [playheadPosition, timeline.tracks, isPlaying])
+
+    // Preload next clip and LayerB for smooth transitions
+    if (nextClip) {
+      const nextVideoEl = videoRefs.current[nextClip.clip_id]
+      if (nextVideoEl && nextVideoEl.readyState < 2) {
+        nextVideoEl.load()
+      }
+      // Preload LayerB so it's ready before transition begins
+      const layerB = videoLayerBRef.current
+      if (layerB && nextVideoEl && layerB.src !== nextVideoEl.src) {
+        layerB.src = nextVideoEl.src
+        layerB.load()
+      }
+    }
+
+    renderFrame(currentTime)
+  }, [currentTime, timeline.tracks, isPlaying, transitions])
 
   const togglePlay = () => {
     if (isPlaying) {
@@ -131,43 +287,93 @@ export default function CompositePreview() {
       const now = performance.now()
       const delta = (now - lastTime) / 1000
       lastTime = now
-      
+
       currentTimelineTime += delta
       setPlayhead(currentTimelineTime)
+      setCurrentTime(currentTimelineTime)
 
-      const videoClips = getAllVideoClips()
-      const audioClips = getAllAudioClips()
-      
-      const activeVideo = getClipAtTime(videoClips, currentTimelineTime)
-      
+      const videoClips = getNormalizedVideoClips()
+      const audioClips = getNormalizedAudioClips()
+
+      const { clip: activeVideo, nextClip, isInTransition, transition } =
+        getClipAtTime(videoClips, currentTimelineTime, transitions)
+
+      const layerA = videoLayerARef.current
+      const layerB = videoLayerBRef.current
+
       if (activeVideo) {
-        const videoEl = videoRefs.current[activeVideo.clip_id]
-        if (videoEl) {
-          const targetMediaTime = getMediaTime(activeVideo, currentTimelineTime)
-          
-          if (Math.abs(videoEl.currentTime - targetMediaTime) > 0.3) {
-            videoEl.currentTime = targetMediaTime
-          }
-          
-          if (videoEl.paused) {
-            videoEl.play().catch(e => console.warn('Play failed:', e))
-          }
-        }
+        // If in transition, use video layers
+        if (isInTransition && nextClip && transition) {
+          if (layerA && layerB) {
+            const videoElA = videoRefs.current[activeVideo.clip_id]
+            const videoElB = videoRefs.current[nextClip.clip_id]
 
-        Object.entries(videoRefs.current).forEach(([id, el]) => {
-          if (id !== activeVideo.clip_id && el && !el.paused) {
-            el.pause()
+            if (videoElA && videoElB) {
+              // Sync layer A
+              if (layerA.src !== videoElA.src) layerA.src = videoElA.src
+              const mediaTimeA = getMediaTime(activeVideo, currentTimelineTime)
+              if (Math.abs(layerA.currentTime - mediaTimeA) > 0.1) {
+                layerA.currentTime = mediaTimeA
+              }
+              if (layerA.paused) {
+                layerA.play().catch(e => console.warn('Layer A play failed:', e))
+              }
+
+              // Sync layer B
+              if (layerB.src !== videoElB.src) layerB.src = videoElB.src
+              const mediaTimeB = getMediaTime(nextClip, currentTimelineTime)
+              if (Math.abs(layerB.currentTime - mediaTimeB) > 0.1) {
+                layerB.currentTime = mediaTimeB
+              }
+              if (layerB.paused) {
+                layerB.play().catch(e => console.warn('Layer B play failed:', e))
+              }
+            }
           }
-        })
+
+          // Pause hidden video refs
+          Object.entries(videoRefs.current).forEach(([id, el]) => {
+            if (el && !el.paused) {
+              el.pause()
+            }
+          })
+        } else {
+          // Normal playback - use video refs
+          const videoEl = videoRefs.current[activeVideo.clip_id]
+          if (videoEl) {
+            const targetMediaTime = getMediaTime(activeVideo, currentTimelineTime)
+
+            if (Math.abs(videoEl.currentTime - targetMediaTime) > 0.1) {
+              videoEl.currentTime = targetMediaTime
+            }
+
+            if (videoEl.paused) {
+              videoEl.play().catch(e => console.warn('Play failed:', e))
+            }
+          }
+
+          // Pause video layers
+          if (layerA && !layerA.paused) layerA.pause()
+          if (layerB && !layerB.paused) layerB.pause()
+
+          // Pause clips that aren't active
+          Object.entries(videoRefs.current).forEach(([id, el]) => {
+            if (id !== activeVideo.clip_id && el && !el.paused) {
+              el.pause()
+            }
+          })
+        }
       } else {
         Object.values(videoRefs.current).forEach(el => el?.pause())
+        if (layerA && !layerA.paused) layerA.pause()
+        if (layerB && !layerB.paused) layerB.pause()
       }
 
       audioClips.forEach(clip => {
         const audioEl = audioRefs.current[clip.clip_id]
         if (!audioEl) return
         
-        const isActive = currentTimelineTime >= clip.start && currentTimelineTime < clip.end
+        const isActive = currentTimelineTime >= clip.timelineStart && currentTimelineTime < clip.timelineEnd
         
         if (isActive) {
           const targetMediaTime = getMediaTime(clip, currentTimelineTime)
@@ -187,7 +393,7 @@ export default function CompositePreview() {
       renderFrame(currentTimelineTime)
 
       const allClips = [...videoClips, ...audioClips]
-      const maxEnd = allClips.length > 0 ? Math.max(...allClips.map(c => c.end)) : 0
+      const maxEnd = allClips.length > 0 ? Math.max(...allClips.map(c => c.timelineEnd)) : 0
       
       if (currentTimelineTime >= maxEnd || currentTimelineTime >= timeline.duration) {
         setIsPlaying(false)
@@ -375,37 +581,106 @@ export default function CompositePreview() {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current) 
   }, [])
 
-  const allVideoClips = getAllVideoClips()
-  const allAudioClips = getAllAudioClips()
-  const allTextClips = getAllTextClips()
-  const activeTexts = allTextClips.filter(clip => 
-    playheadPosition >= clip.start && playheadPosition < clip.end
+  const allVideoClips = getNormalizedVideoClips()
+  const allAudioClips = getNormalizedAudioClips()
+  const allTextClips = getNormalizedTextClips()
+  const activeTexts = allTextClips.filter(clip =>
+    playheadPosition >= clip.timelineStart && playheadPosition < clip.timelineEnd
   )
 
   return (
-    <div 
+    <div
       ref={previewRef}
-      style={{ 
-        width: "100%", 
-        height: "100%", 
-        display: "flex", 
-        alignItems: "center", 
-        justifyContent: "center", 
-        position: "relative", 
-        background: "#000"
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        position: "relative",
+        background: "#000",
+        overflow: "hidden" // CRITICAL: prevents escape
       }}
     >
-      <canvas 
-        ref={canvasRef} 
-        width={PREVIEW_WIDTH} 
-        height={PREVIEW_HEIGHT} 
-        style={{ 
-          maxWidth: "100%", 
-          maxHeight: "100%", 
-          objectFit: "contain", 
-          borderRadius: "8px" 
-        }} 
+      {/* Canvas for normal rendering */}
+      <canvas
+        ref={canvasRef}
+        width={PREVIEW_WIDTH}
+        height={PREVIEW_HEIGHT}
+        style={{
+          maxWidth: "100%",
+          maxHeight: "100%",
+          objectFit: "contain",
+          borderRadius: "8px",
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          zIndex: 1
+        }}
       />
+
+      {/* Transition Container - ensures video layers stay contained */}
+      <div
+        className="transition-container"
+        style={{
+          position: "absolute",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          width: "100%",
+          height: "100%",
+          maxWidth: "100%",
+          maxHeight: "100%",
+          overflow: "hidden", // CRITICAL: clips content
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          pointerEvents: "none"
+        }}
+      >
+        {/* Video Layer A - for transitions */}
+        <video
+          ref={videoLayerARef}
+          muted={false}
+          playsInline
+          preload="auto"
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            display: "none",
+            transformOrigin: "center center",
+            willChange: "transform, opacity, filter",
+            transition: "none", // Disable CSS transitions for immediate updates
+            zIndex: 2
+          }}
+        />
+
+        {/* Video Layer B - for transitions */}
+        <video
+          ref={videoLayerBRef}
+          muted={false}
+          playsInline
+          preload="auto"
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            display: "none",
+            transformOrigin: "center center",
+            willChange: "transform, opacity, filter",
+            transition: "none", // Disable CSS transitions for immediate updates
+            zIndex: 3
+          }}
+        />
+      </div>
 
       {activeTexts.map(clip => {
         const style = clip.textStyle || {}

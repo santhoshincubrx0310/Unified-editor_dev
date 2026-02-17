@@ -1,18 +1,23 @@
 // src/store/editorStore.js
 import { create } from "zustand"
 
+// Master timeline constants
+export const PIXELS_PER_SECOND = 50 // Consistent pixel-to-time mapping
+
 export const useEditorStore = create((set, get) => ({
   sessionId: null,
 
   timeline: {
     duration: 120,
-    zoom_level: 5,
+    zoom_level: PIXELS_PER_SECOND, // ✅ FIX: Was 5, now 50 — must match PIXELS_PER_SECOND
     playhead_position: 0,
     selectedClipId: null,
-    tracks: []
+    tracks: [],
+    transitions: []
   },
 
   isPlaying: false,
+  currentTime: 0,
 
   togglePlayPause: () =>
     set((state) => ({
@@ -24,7 +29,13 @@ export const useEditorStore = create((set, get) => ({
       timeline: {
         ...state.timeline,
         playhead_position: position
-      }
+      },
+      currentTime: position
+    })),
+
+  setCurrentTime: (time) =>
+    set(() => ({
+      currentTime: time
     })),
 
   loadTimeline: (timelineData) =>
@@ -32,6 +43,7 @@ export const useEditorStore = create((set, get) => ({
       timeline: {
         ...state.timeline,
         ...timelineData,
+        zoom_level: timelineData.zoom_level || PIXELS_PER_SECOND, // ✅ FIX: Always default to PIXELS_PER_SECOND
         playhead_position: 0,
         selectedClipId: null
       }
@@ -39,14 +51,11 @@ export const useEditorStore = create((set, get) => ({
 
   addTrack: (type) =>
     set((state) => {
-      // Check if track of this type already exists
       const trackExists = state.timeline.tracks.some(track => track.type === type)
-      
       if (trackExists) {
         console.warn(`${type} track already exists. Only one track per type allowed.`)
-        return state // Don't add, return unchanged state
+        return state
       }
-      
       return {
         timeline: {
           ...state.timeline,
@@ -78,10 +87,7 @@ export const useEditorStore = create((set, get) => ({
         ...state.timeline,
         tracks: state.timeline.tracks.map((track) => {
           if (track.track_id !== trackId) return track
-          
-          // Calculate duration from end if start not provided
           const duration = clipData.end - (clipData.start || 0)
-          
           return {
             ...track,
             clips: [
@@ -209,7 +215,6 @@ export const useEditorStore = create((set, get) => ({
               end: playheadPos,
               trim_end: (clipToSplit.trim_start || 0) + timeInClip
             }
-
             const rightClip = {
               ...clipToSplit,
               clip_id: `${clipToSplit.clip_id}_R${Date.now()}`,
@@ -229,11 +234,12 @@ export const useEditorStore = create((set, get) => ({
       }
     }),
 
+  // ✅ FIX: Zoom in/out now scales around PIXELS_PER_SECOND baseline
   zoomIn: () =>
     set((state) => ({
       timeline: {
         ...state.timeline,
-        zoom_level: Math.min(state.timeline.zoom_level + 2, 50)
+        zoom_level: Math.min(state.timeline.zoom_level + 10, 200) // ✅ Step by 10px, max 200
       }
     })),
 
@@ -241,7 +247,97 @@ export const useEditorStore = create((set, get) => ({
     set((state) => ({
       timeline: {
         ...state.timeline,
-        zoom_level: Math.max(state.timeline.zoom_level - 2, 2)
+        zoom_level: Math.max(state.timeline.zoom_level - 10, 10) // ✅ Step by 10px, min 10
       }
-    }))
+    })),
+
+  addClipFromLibrary: (trackId, libraryClip) =>
+    set((state) => ({
+      timeline: {
+        ...state.timeline,
+        tracks: state.timeline.tracks.map((track) => {
+          if (track.track_id !== trackId) return track
+
+          const lastClipEnd = track.clips.length > 0
+            ? Math.max(...track.clips.map(c => c.end))
+            : 0
+
+          const newClip = {
+            clip_id: libraryClip.clip_id || `clip_${Date.now()}`,
+            start: lastClipEnd,
+            end: lastClipEnd + (libraryClip.duration || 5),
+            type: "video",
+            src: libraryClip.source_video || libraryClip.src,
+            trim_start: libraryClip.start_time || 0,
+            trim_end: libraryClip.end_time || libraryClip.duration || 5,
+            platform: libraryClip.platform,
+            score: libraryClip.score,
+            topic: libraryClip.topic,
+            transition: "none"
+          }
+
+          return {
+            ...track,
+            clips: [...track.clips, newClip]
+          }
+        })
+      }
+    })),
+
+  updateClipTransition: (clipId, transitionType) =>
+    set((state) => ({
+      timeline: {
+        ...state.timeline,
+        tracks: state.timeline.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) =>
+            clip.clip_id === clipId
+              ? { ...clip, transition: transitionType }
+              : clip
+          )
+        }))
+      }
+    })),
+
+  addTransition: (fromClipId, toClipId, type = "fade", duration = 0.5) =>
+    set((state) => {
+      const existingIndex = state.timeline.transitions.findIndex(
+        t => t.fromClipId === fromClipId && t.toClipId === toClipId
+      )
+
+      let newTransitions
+      if (existingIndex >= 0) {
+        newTransitions = [...state.timeline.transitions]
+        newTransitions[existingIndex] = { fromClipId, toClipId, type, duration }
+      } else {
+        newTransitions = [
+          ...state.timeline.transitions,
+          { fromClipId, toClipId, type, duration }
+        ]
+      }
+
+      return {
+        timeline: {
+          ...state.timeline,
+          transitions: newTransitions
+        }
+      }
+    }),
+
+  removeTransition: (fromClipId, toClipId) =>
+    set((state) => ({
+      timeline: {
+        ...state.timeline,
+        transitions: state.timeline.transitions.filter(
+          t => !(t.fromClipId === fromClipId && t.toClipId === toClipId)
+        )
+      }
+    })),
+
+  getTransition: (fromClipId, toClipId) => {
+    const state = get()
+    return state.timeline.transitions.find(
+      t => t.fromClipId === fromClipId && t.toClipId === toClipId
+    )
+  }
 }))

@@ -1,28 +1,35 @@
 // src/components/editor/Timeline.jsx
-import { useEditorStore } from "../../store/editorStore"
+import { useEditorStore, PIXELS_PER_SECOND } from "../../store/editorStore"
 import Clip from "./Clip"
+import TransitionOverlay from "./TransitionOverlay"
+import { normalizeTimeline } from "../../utils/timelineUtils"
 import { useRef } from "react"
 
 export default function Timeline({ onTrackAdd }) {
   const timeline = useEditorStore((s) => s.timeline)
   const setPlayhead = useEditorStore((s) => s.setPlayhead)
   const selectClip = useEditorStore((s) => s.selectClip)
-  
+  const addClipFromLibrary = useEditorStore((s) => s.addClipFromLibrary)
+  const updateClipTransition = useEditorStore((s) => s.updateClipTransition)
+  const currentTime = useEditorStore((s) => s.currentTime)
+
   const timelineRef = useRef(null)
 
-  const timelineWidth = timeline.duration * timeline.zoom_level
+  // Use consistent pixel-to-time mapping
+  const pixelsPerSecond = timeline.zoom_level || PIXELS_PER_SECOND
+  const timelineWidth = timeline.duration * pixelsPerSecond
 
   const handlePlayheadDrag = (e) => {
     e.preventDefault()
     e.stopPropagation()
-    
+
     const container = timelineRef.current.parentElement
     const containerRect = container.getBoundingClientRect()
     const scrollLeft = container.scrollLeft || 0
-    
+
     const handleMouseMove = (moveEvent) => {
       const x = moveEvent.clientX - containerRect.left + scrollLeft
-      const newTime = Math.max(0, Math.min(x / timeline.zoom_level, timeline.duration))
+      const newTime = Math.max(0, Math.min(x / pixelsPerSecond, timeline.duration))
       setPlayhead(newTime)
     }
 
@@ -36,7 +43,7 @@ export default function Timeline({ onTrackAdd }) {
   }
 
   const handleClick = (e) => {
-    if (e.target.classList.contains('timeline-inner') || 
+    if (e.target.classList.contains('timeline-inner') ||
         e.target.classList.contains('timeline-ruler') ||
         e.target.classList.contains('tick') ||
         e.target.classList.contains('lane-content')) {
@@ -44,10 +51,30 @@ export default function Timeline({ onTrackAdd }) {
       const rect = container.getBoundingClientRect()
       const scrollLeft = container.scrollLeft || 0
       const clickX = e.clientX - rect.left + scrollLeft
-      const newTime = Math.max(0, Math.min(clickX / timeline.zoom_level, timeline.duration))
+      const newTime = Math.max(0, Math.min(clickX / pixelsPerSecond, timeline.duration))
       setPlayhead(newTime)
       selectClip(null)
     }
+  }
+
+  const handleDrop = (e, trackId) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    try {
+      const data = JSON.parse(e.dataTransfer.getData("application/json"))
+
+      if (data.type === "library-clip" && data.clip) {
+        addClipFromLibrary(trackId, data.clip)
+      }
+    } catch (err) {
+      console.error("Failed to handle drop:", err)
+    }
+  }
+
+  const handleDragOver = (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = "copy"
   }
 
   const ticks = []
@@ -120,7 +147,7 @@ export default function Timeline({ onTrackAdd }) {
               className="tick"
               style={{
                 position: 'absolute',
-                left: t * timeline.zoom_level,
+                left: t * pixelsPerSecond,
                 height: '100%',
                 display: 'flex',
                 flexDirection: 'column',
@@ -179,10 +206,21 @@ export default function Timeline({ onTrackAdd }) {
           
           {timeline.tracks.map((track) => {
             const config = getTrackConfig(track.type)
-            
+
+            // Normalize clips: video tracks get overlap-aware layout,
+            // other tracks keep their stored positions.
+            const normalizedClips = track.type === 'video' && track.clips
+              ? normalizeTimeline(track.clips, timeline.transitions || [])
+              : (track.clips || []).map(clip => ({
+                  ...clip,
+                  duration: clip.end - clip.start,
+                  timelineStart: clip.start,
+                  timelineEnd: clip.end
+                }))
+
             return (
-              <div 
-                key={track.track_id} 
+              <div
+                key={track.track_id}
                 style={{
                   ...config,
                   position: 'relative',
@@ -192,6 +230,8 @@ export default function Timeline({ onTrackAdd }) {
                   overflow: 'visible',
                   boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)'
                 }}
+                onDrop={(e) => handleDrop(e, track.track_id)}
+                onDragOver={handleDragOver}
               >
                 <div className="lane-content" style={{
                   position: 'relative',
@@ -199,7 +239,7 @@ export default function Timeline({ onTrackAdd }) {
                   height: '100%',
                   minHeight: config.height
                 }}>
-                  {(!track.clips || track.clips.length === 0) && (
+                  {normalizedClips.length === 0 && (
                     <div style={{
                       position: 'absolute',
                       left: '50%',
@@ -214,15 +254,30 @@ export default function Timeline({ onTrackAdd }) {
                       Empty {track.type} track
                     </div>
                   )}
-                  
-                  {track.clips && track.clips.map((clip) => (
-                    <Clip 
-                      key={clip.clip_id} 
-                      clip={clip} 
-                      trackType={track.type}
-                      trackHeight={parseInt(config.height)}
-                    />
-                  ))}
+
+                  {normalizedClips.map((clip, index) => {
+                    const nextClip = normalizedClips[index + 1]
+
+                    return (
+                      <div key={clip.clip_id} style={{ position: 'relative' }}>
+                        <Clip
+                          clip={clip}
+                          trackType={track.type}
+                          trackHeight={parseInt(config.height)}
+                          pixelsPerSecond={pixelsPerSecond}
+                        />
+
+                        {/* Transition Overlay between clips */}
+                        {nextClip && (
+                          <TransitionOverlay
+                            fromClip={clip}
+                            toClip={nextClip}
+                            trackHeight={parseInt(config.height)}
+                          />
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
 
                 <button
@@ -267,13 +322,13 @@ export default function Timeline({ onTrackAdd }) {
             )
           })}
 
-          {/* Playhead - ONLY IN TIMELINE AREA */}
+          {/* Playhead - ONLY IN TIMELINE AREA - Synced with currentTime */}
           {timeline.tracks.length > 0 && (
             <div
               onMouseDown={handlePlayheadDrag}
               style={{
                 position: 'absolute',
-                left: timeline.playhead_position * timeline.zoom_level,
+                left: currentTime * pixelsPerSecond,
                 top: '-44px',
                 height: 'calc(100% + 44px)',
                 width: '2px',
@@ -281,7 +336,8 @@ export default function Timeline({ onTrackAdd }) {
                 boxShadow: '0 0 8px rgba(34, 211, 238, 0.6)',
                 cursor: 'ew-resize',
                 zIndex: 100,
-                pointerEvents: 'auto'
+                pointerEvents: 'auto',
+                transition: 'none' // No transition for smooth dragging
               }}
             >
               <div 

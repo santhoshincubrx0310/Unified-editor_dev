@@ -81,7 +81,7 @@ func (s *SessionService) findExistingSession(ctx context.Context, userID, conten
 		SELECT session_id, user_id, content_id, timeline, version, status,
 		       source_asset_id, source_job_id, source_module, platform,
 		       exported_asset_id, export_status, created_at, updated_at
-		FROM editor_sessions
+		FROM editor_sessions_test
 		WHERE user_id = $1 AND content_id = $2
 		ORDER BY created_at DESC
 		LIMIT 1
@@ -122,7 +122,7 @@ func (s *SessionService) findExistingSession(ctx context.Context, userID, conten
 
 func (s *SessionService) createSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
-		INSERT INTO editor_sessions (user_id, content_id)
+		INSERT INTO editor_sessions_test (user_id, content_id)
 		VALUES ($1, $2)
 		RETURNING session_id, timeline, version, status,
 		          source_asset_id, source_job_id, source_module, platform,
@@ -166,7 +166,7 @@ func (s *SessionService) createSessionWithSource(
 	sourceAssetID, sourceJobID, sourceModule, platform string,
 ) (*models.EditorSession, error) {
 	query := `
-		INSERT INTO editor_sessions (
+		INSERT INTO editor_sessions_test (
 			user_id, content_id, source_asset_id, source_job_id, source_module, platform
 		)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -176,13 +176,30 @@ func (s *SessionService) createSessionWithSource(
 	`
 
 	session := &models.EditorSession{
-		UserID:        userID,
-		ContentID:     contentID,
-		SourceAssetID: sourceAssetID,
-		SourceJobID:   sourceJobID,
-		SourceModule:  sourceModule,
-		Platform:      platform,
+		UserID:    userID,
+		ContentID: contentID,
+
+		SourceAssetID: sql.NullString{
+			String: sourceAssetID,
+			Valid:  sourceAssetID != "",
+		},
+
+		SourceJobID: sql.NullString{
+			String: sourceJobID,
+			Valid:  sourceJobID != "",
+		},
+
+		SourceModule: sql.NullString{
+			String: sourceModule,
+			Valid:  sourceModule != "",
+		},
+
+		Platform: sql.NullString{
+			String: platform,
+			Valid:  platform != "",
+		},
 	}
+
 	var timelineJSON []byte
 
 	err := s.DB.QueryRowContext(ctx, query, userID, contentID, sourceAssetID, sourceJobID, sourceModule, platform).Scan(
@@ -221,7 +238,7 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 		SELECT session_id, user_id, content_id, timeline, version, status,
 		       source_asset_id, source_job_id, source_module, platform,
 		       exported_asset_id, export_status, created_at, updated_at
-		FROM editor_sessions
+		FROM editor_sessions_test
 		WHERE session_id = $1
 	`
 
@@ -275,7 +292,7 @@ func (s *SessionService) SaveSession(id uuid.UUID, timeline map[string]interface
 	}
 
 	query := `
-		UPDATE editor_sessions
+		UPDATE editor_sessions_test
 		SET timeline   = $1,
 		    version    = version + 1,
 		    updated_at = NOW()
@@ -301,6 +318,6 @@ func (s *SessionService) DeleteSession(id uuid.UUID) error {
 	defer cancel()
 
 	_, err := s.DB.ExecContext(ctx,
-		`DELETE FROM editor_sessions WHERE session_id = $1`, id)
+		`DELETE FROM editor_sessions_test WHERE session_id = $1`, id)
 	return err
 }

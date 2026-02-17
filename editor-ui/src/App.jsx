@@ -13,6 +13,8 @@ import { useState, useEffect, useRef } from "react"
 import Timeline from "./components/editor/Timeline"
 import CompositePreview from "./components/editor/CompositePreview"
 import TextPropertiesPanel from "./components/editor/TextPropertiesPanel"
+import ClipLibraryPanel from "./components/editor/ClipLibraryPanel"
+import HighlightControls from "./components/editor/HighlightControls"
 import { useEditorStore } from "./store/editorStore"
 import {
   createSession,
@@ -38,7 +40,9 @@ function App({ contentId }) {
   const [initError, setInitError] = useState(null)
 
   const [dividerPosition, setDividerPosition] = useState(350)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(300)
   const [dragging, setDragging] = useState(false)
+  const [draggingLeftPanel, setDraggingLeftPanel] = useState(false)
 
   const videoInputRef = useRef(null)
   const audioInputRef = useRef(null)
@@ -46,6 +50,8 @@ function App({ contentId }) {
 
   const startDrag = () => setDragging(true)
   const stopDrag = () => setDragging(false)
+  const startLeftPanelDrag = () => setDraggingLeftPanel(true)
+  const stopLeftPanelDrag = () => setDraggingLeftPanel(false)
 
   useEffect(() => {
     const move = (e) => {
@@ -59,6 +65,19 @@ function App({ contentId }) {
       window.removeEventListener("mouseup", stopDrag)
     }
   }, [dragging])
+
+  useEffect(() => {
+    const move = (e) => {
+      if (!draggingLeftPanel) return
+      setLeftPanelWidth(Math.max(200, Math.min(e.clientX, 500)))
+    }
+    window.addEventListener("mousemove", move)
+    window.addEventListener("mouseup", stopLeftPanelDrag)
+    return () => {
+      window.removeEventListener("mousemove", move)
+      window.removeEventListener("mouseup", stopLeftPanelDrag)
+    }
+  }, [draggingLeftPanel])
 
   // ── Session init — NO more hardcoded IDs ──────────────────────────────────
   useEffect(() => {
@@ -223,6 +242,11 @@ function App({ contentId }) {
     )
   }
 
+  const handleHighlightSessionCreated = (session) => {
+    console.log("Highlight session created:", session)
+    alert(`Highlight session created: ${session.session_id}`)
+  }
+
   return (
     <div className="app-container">
       <header className="header">
@@ -253,60 +277,114 @@ function App({ contentId }) {
         </div>
       </header>
 
-      <div className="preview-area" style={{ height: dividerPosition }}>
-        <CompositePreview />
-      </div>
+      {/* Main content area with left panel and editor */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        {/* Left Panel: Clip Library */}
+        <div style={{ width: `${leftPanelWidth}px`, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <ClipLibraryPanel
+            contentId={import.meta.env.VITE_DEV_CONTENT_ID}
+          />
+        </div>
 
-      <div style={{ height: "6px", background: "#00f0ff", cursor: "row-resize" }} onMouseDown={startDrag} />
+        {/* Vertical Divider */}
+        <div
+          style={{
+            width: "4px",
+            background: "#1e293b",
+            cursor: "col-resize",
+            flexShrink: 0,
+            position: 'relative'
+          }}
+          onMouseDown={startLeftPanelDrag}
+        >
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '12px',
+            height: '40px',
+            background: 'rgba(34, 211, 238, 0.3)',
+            borderRadius: '4px',
+            pointerEvents: 'none'
+          }} />
+        </div>
 
-      <div className="track-controls">
-        <button
-          onClick={() => addTrack("video")}
-          disabled={timeline.tracks.some(t => t.type === 'video')}
-          style={{
-            opacity: timeline.tracks.some(t => t.type === 'video') ? 0.5 : 1,
-            cursor: timeline.tracks.some(t => t.type === 'video') ? 'not-allowed' : 'pointer'
-          }}
-        >
-          {timeline.tracks.some(t => t.type === 'video') ? '✓ Video Track' : '+ Video Track'}
-        </button>
-        <button
-          onClick={() => addTrack("audio")}
-          disabled={timeline.tracks.some(t => t.type === 'audio')}
-          style={{
-            opacity: timeline.tracks.some(t => t.type === 'audio') ? 0.5 : 1,
-            cursor: timeline.tracks.some(t => t.type === 'audio') ? 'not-allowed' : 'pointer'
-          }}
-        >
-          {timeline.tracks.some(t => t.type === 'audio') ? '✓ Audio Track' : '+ Audio Track'}
-        </button>
-        <button
-          onClick={() => addTrack("text")}
-          disabled={timeline.tracks.some(t => t.type === 'text')}
-          style={{
-            opacity: timeline.tracks.some(t => t.type === 'text') ? 0.5 : 1,
-            cursor: timeline.tracks.some(t => t.type === 'text') ? 'not-allowed' : 'pointer'
-          }}
-        >
-          {timeline.tracks.some(t => t.type === 'text') ? '✓ Text Track' : '+ Text Track'}
-        </button>
-        <button onClick={zoomIn}>Zoom In (zoom: {timeline.zoom_level})</button>
-        <button onClick={zoomOut}>Zoom Out</button>
-        <button
-          onClick={handleSplit}
-          style={{ background: '#2563eb', fontWeight: '600' }}
-          onMouseEnter={(e) => e.currentTarget.style.background = '#1e4fd8'}
-          onMouseLeave={(e) => e.currentTarget.style.background = '#2563eb'}
-        >
-          ✂️ Split Clip
-        </button>
+        {/* Right Panel: Preview and Timeline */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Preview Area */}
+          <div className="preview-area" style={{ height: dividerPosition }}>
+            <CompositePreview />
+          </div>
+
+          {/* Horizontal Divider */}
+          <div style={{ height: "6px", background: "#00f0ff", cursor: "row-resize", flexShrink: 0 }} onMouseDown={startDrag} />
+
+          {/* Bottom Section: Controls + Timeline */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#0a0e1a' }}>
+            <div className="track-controls">
+              <button
+                onClick={() => addTrack("video")}
+                disabled={timeline.tracks.some(t => t.type === 'video')}
+                style={{
+                  opacity: timeline.tracks.some(t => t.type === 'video') ? 0.5 : 1,
+                  cursor: timeline.tracks.some(t => t.type === 'video') ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {timeline.tracks.some(t => t.type === 'video') ? '✓ Video Track' : '+ Video Track'}
+              </button>
+              <button
+                onClick={() => addTrack("audio")}
+                disabled={timeline.tracks.some(t => t.type === 'audio')}
+                style={{
+                  opacity: timeline.tracks.some(t => t.type === 'audio') ? 0.5 : 1,
+                  cursor: timeline.tracks.some(t => t.type === 'audio') ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {timeline.tracks.some(t => t.type === 'audio') ? '✓ Audio Track' : '+ Audio Track'}
+              </button>
+              <button
+                onClick={() => addTrack("text")}
+                disabled={timeline.tracks.some(t => t.type === 'text')}
+                style={{
+                  opacity: timeline.tracks.some(t => t.type === 'text') ? 0.5 : 1,
+                  cursor: timeline.tracks.some(t => t.type === 'text') ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {timeline.tracks.some(t => t.type === 'text') ? '✓ Text Track' : '+ Text Track'}
+              </button>
+              <button onClick={zoomIn}>Zoom In (zoom: {timeline.zoom_level})</button>
+              <button onClick={zoomOut}>Zoom Out</button>
+              <button
+                onClick={handleSplit}
+                style={{ background: '#2563eb', fontWeight: '600' }}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#1e4fd8'}
+                onMouseLeave={(e) => e.currentTarget.style.background = '#2563eb'}
+              >
+                ✂️ Split Clip
+              </button>
+            </div>
+
+            {/* Highlight Controls Section */}
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+              <HighlightControls
+                contentId={import.meta.env.VITE_DEV_CONTENT_ID}
+                onSessionCreated={handleHighlightSessionCreated}
+              />
+            </div>
+
+            {/* Timeline Section */}
+            <div style={{ flex: 1, overflow: 'hidden' }}>
+              <Timeline onTrackAdd={handleTrackAdd} />
+            </div>
+          </div>
+        </div>
       </div>
 
       <input type="file" accept="video/*" ref={videoInputRef} style={{ display: "none" }} onChange={handleVideoSelect} />
       <input type="file" accept="audio/*" ref={audioInputRef} style={{ display: "none" }} onChange={handleAudioSelect} />
 
       <TextPropertiesPanel />
-      <Timeline onTrackAdd={handleTrackAdd} />
     </div>
   )
 }
