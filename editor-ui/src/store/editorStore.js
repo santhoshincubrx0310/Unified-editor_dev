@@ -39,15 +39,32 @@ export const useEditorStore = create((set, get) => ({
     })),
 
   loadTimeline: (timelineData) =>
-    set((state) => ({
-      timeline: {
-        ...state.timeline,
-        ...timelineData,
-        zoom_level: timelineData.zoom_level || PIXELS_PER_SECOND, // ✅ FIX: Always default to PIXELS_PER_SECOND
-        playhead_position: 0,
-        selectedClipId: null
+    set((state) => {
+      // Normalize tracks and clips from backend
+      const normalizedTracks = (timelineData.tracks || []).map((track, tIdx) => ({
+        ...track,
+        track_id: track.track_id || `track_${track.type || 'video'}_${tIdx}`,
+        clips: (track.clips || []).map((clip) => ({
+          ...clip,
+          // Ensure clip_id exists (backend uses "id", frontend expects "clip_id")
+          clip_id: clip.clip_id || clip.id || `clip_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          // Preserve original_clip_id for highlight matching
+          original_clip_id: clip.original_clip_id || clip.clip_id || clip.id,
+        }))
+      }))
+
+      return {
+        timeline: {
+          ...state.timeline,
+          ...timelineData,
+          tracks: normalizedTracks,
+          zoom_level: timelineData.zoom_level || PIXELS_PER_SECOND,
+          playhead_position: 0,
+          selectedClipId: null,
+          transitions: timelineData.transitions || []
+        }
       }
-    })),
+    }),
 
   addTrack: (type) =>
     set((state) => {
@@ -252,37 +269,59 @@ export const useEditorStore = create((set, get) => ({
     })),
 
   addClipFromLibrary: (trackId, libraryClip) =>
-    set((state) => ({
-      timeline: {
-        ...state.timeline,
-        tracks: state.timeline.tracks.map((track) => {
-          if (track.track_id !== trackId) return track
+    set((state) => {
+      // Compute actual clip duration from all available fields
+      const clipDuration = libraryClip.duration
+        || (libraryClip.end_time && libraryClip.start_time ? libraryClip.end_time - libraryClip.start_time : 0)
+        || (libraryClip.end_time || 0)
+        || 5
 
-          const lastClipEnd = track.clips.length > 0
-            ? Math.max(...track.clips.map(c => c.end))
-            : 0
+      const newTracks = state.timeline.tracks.map((track) => {
+        if (track.track_id !== trackId) return track
 
-          const newClip = {
-            clip_id: libraryClip.clip_id || `clip_${Date.now()}`,
-            start: lastClipEnd,
-            end: lastClipEnd + (libraryClip.duration || 5),
-            type: "video",
-            src: libraryClip.source_video || libraryClip.src,
-            trim_start: libraryClip.start_time || 0,
-            trim_end: libraryClip.end_time || libraryClip.duration || 5,
-            platform: libraryClip.platform,
-            score: libraryClip.score,
-            topic: libraryClip.topic,
-            transition: "none"
+        const lastClipEnd = track.clips.length > 0
+          ? Math.max(...track.clips.map(c => c.end))
+          : 0
+
+        const newClip = {
+          clip_id: `${libraryClip.clip_id}_${Date.now()}`,
+          original_clip_id: libraryClip.clip_id,
+          start: lastClipEnd,
+          end: lastClipEnd + clipDuration,
+          type: "video",
+          src: libraryClip.source_video || libraryClip.s3_url || libraryClip.src,
+          trim_start: libraryClip.start_time || 0,
+          trim_end: libraryClip.end_time || clipDuration,
+          platform: libraryClip.platform,
+          score: libraryClip.score,
+          topic: libraryClip.topic,
+          transition: "none"
+        }
+
+        return {
+          ...track,
+          clips: [...track.clips, newClip]
+        }
+      })
+
+      // Auto-extend timeline duration to fit all clips + 10s buffer
+      let maxEnd = state.timeline.duration
+      for (const track of newTracks) {
+        for (const clip of track.clips) {
+          if (clip.end > maxEnd - 5) {
+            maxEnd = clip.end + 10
           }
-
-          return {
-            ...track,
-            clips: [...track.clips, newClip]
-          }
-        })
+        }
       }
-    })),
+
+      return {
+        timeline: {
+          ...state.timeline,
+          tracks: newTracks,
+          duration: maxEnd
+        }
+      }
+    }),
 
   updateClipTransition: (clipId, transitionType) =>
     set((state) => ({

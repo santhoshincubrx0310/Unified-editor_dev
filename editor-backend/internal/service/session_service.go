@@ -23,6 +23,70 @@ type SessionService struct {
 	DB *sql.DB
 }
 
+// ============================================================================
+// FULL COLUMN LIST — used by all SELECT queries
+// ============================================================================
+// Centralised here so adding a column means updating ONE place.
+
+const sessionSelectColumns = `
+	session_id, user_id, content_id, timeline, version, status,
+	source_asset_id, source_job_id, source_module, platform,
+	exported_asset_id, export_status,
+	created_at, updated_at
+`
+
+// scanSession maps a row into an EditorSession. Every SELECT that returns
+// sessionSelectColumns must use this helper — keeps scan order in sync.
+func scanSession(scanner interface{ Scan(dest ...interface{}) error }) (*models.EditorSession, error) {
+	session := &models.EditorSession{}
+	var timelineJSON []byte
+	var sourceJobID, sourceModule, platform sql.NullString
+	var exportStatus sql.NullString
+
+	err := scanner.Scan(
+		&session.SessionID,
+		&session.UserID,
+		&session.ContentID,
+		&timelineJSON,
+		&session.Version,
+		&session.Status,
+		&session.SourceAssetID,
+		&sourceJobID,
+		&sourceModule,
+		&platform,
+		&session.ExportedAssetID,
+		&exportStatus,
+		&session.CreatedAt,
+		&session.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if sourceJobID.Valid {
+		session.SourceJobID = sourceJobID.String
+	}
+	if sourceModule.Valid {
+		session.SourceModule = sourceModule.String
+	}
+	if platform.Valid {
+		session.Platform = platform.String
+	}
+	if exportStatus.Valid {
+		session.ExportStatus = exportStatus.String
+	}
+
+	if len(timelineJSON) > 0 {
+		json.Unmarshal(timelineJSON, &session.Timeline)
+	}
+
+	return session, nil
+}
+
+// ============================================================================
+// FIND OR CREATE — Original (untouched contract, updated internals)
+// ============================================================================
+
 // FindOrCreateSession is the KEY fix for the 164-orphaned-rows problem.
 //
 // Old behaviour:  Every page load → INSERT → new orphan row
@@ -52,8 +116,17 @@ func (s *SessionService) FindOrCreateSession(userID, contentID uuid.UUID) (*mode
 	return s.createSession(ctx, userID, contentID)
 }
 
-// FindOrCreateSessionWithSource creates or finds a session with repurposer source tracking.
-// Used by Phase 2 repurposer integration to link sessions to source clips and jobs.
+// ============================================================================
+// FIND OR CREATE WITH SOURCE — NEW (for Repurposer / Content Hub integration)
+// ============================================================================
+
+// FindOrCreateSessionWithSource creates an editing session with full source
+// context (which asset, which job, which module, which platform). If a session
+// already exists for this user + contentID, it is returned instead.
+//
+// When source_asset_id is provided by the caller, it should be passed as
+// contentID — this enables the "click Edit twice on same clip → same session"
+// behaviour via findExistingSession.
 func (s *SessionService) FindOrCreateSessionWithSource(
 	userID, contentID uuid.UUID,
 	sourceAssetID, sourceJobID, sourceModule, platform string,
@@ -61,171 +134,106 @@ func (s *SessionService) FindOrCreateSessionWithSource(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Step 1: Look for existing session for this user + content
+	// Step 1: Reuse existing session (same logic as FindOrCreateSession)
 	existing, err := s.findExistingSession(ctx, userID, contentID)
 	if err == nil {
-		// Found one — return it
 		return existing, nil
 	}
 	if !errors.Is(err, ErrSessionNotFound) {
-		// Unexpected DB error
 		return nil, err
 	}
 
-	// Step 2: No existing session — create one with source fields
-	return s.createSessionWithSource(ctx, userID, contentID, sourceAssetID, sourceJobID, sourceModule, platform)
+	// Step 2: Create new session WITH source context
+	return s.createSessionWithSource(ctx, userID, contentID,
+		sourceAssetID, sourceJobID, sourceModule, platform)
 }
+
+// ============================================================================
+// INTERNAL — FIND
+// ============================================================================
 
 func (s *SessionService) findExistingSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
-		SELECT session_id, user_id, content_id, timeline, version, status,
-		       source_asset_id, source_job_id, source_module, platform,
-		       exported_asset_id, export_status, created_at, updated_at
-		FROM editor_sessions_test
+		SELECT ` + sessionSelectColumns + `
+		FROM editor_sessions
 		WHERE user_id = $1 AND content_id = $2
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
 
-	session := &models.EditorSession{}
-	var timelineJSON []byte
-
-	err := s.DB.QueryRowContext(ctx, query, userID, contentID).Scan(
-		&session.SessionID,
-		&session.UserID,
-		&session.ContentID,
-		&timelineJSON,
-		&session.Version,
-		&session.Status,
-		&session.SourceAssetID,
-		&session.SourceJobID,
-		&session.SourceModule,
-		&session.Platform,
-		&session.ExportedAssetID,
-		&session.ExportStatus,
-		&session.CreatedAt,
-		&session.UpdatedAt,
-	)
+	row := s.DB.QueryRowContext(ctx, query, userID, contentID)
+	session, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	if len(timelineJSON) > 0 {
-		json.Unmarshal(timelineJSON, &session.Timeline)
-	}
-
-	return session, nil
+	return session, err
 }
+
+// ============================================================================
+// INTERNAL — CREATE (original, no source context)
+// ============================================================================
 
 func (s *SessionService) createSession(ctx context.Context, userID, contentID uuid.UUID) (*models.EditorSession, error) {
 	query := `
-		INSERT INTO editor_sessions_test (user_id, content_id)
+		INSERT INTO editor_sessions (user_id, content_id)
 		VALUES ($1, $2)
-		RETURNING session_id, timeline, version, status,
-		          source_asset_id, source_job_id, source_module, platform,
-		          exported_asset_id, export_status, created_at, updated_at
-	`
+		RETURNING ` + sessionSelectColumns
 
-	session := &models.EditorSession{
-		UserID:    userID,
-		ContentID: contentID,
-	}
-	var timelineJSON []byte
-
-	err := s.DB.QueryRowContext(ctx, query, userID, contentID).Scan(
-		&session.SessionID,
-		&timelineJSON,
-		&session.Version,
-		&session.Status,
-		&session.SourceAssetID,
-		&session.SourceJobID,
-		&session.SourceModule,
-		&session.Platform,
-		&session.ExportedAssetID,
-		&session.ExportStatus,
-		&session.CreatedAt,
-		&session.UpdatedAt,
-	)
+	row := s.DB.QueryRowContext(ctx, query, userID, contentID)
+	session, err := scanSession(row)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(timelineJSON) > 0 {
-		json.Unmarshal(timelineJSON, &session.Timeline)
-	}
-
+	session.UserID = userID
+	session.ContentID = contentID
 	return session, nil
 }
+
+// ============================================================================
+// INTERNAL — CREATE WITH SOURCE (new, for clip editing)
+// ============================================================================
 
 func (s *SessionService) createSessionWithSource(
-	ctx context.Context,
-	userID, contentID uuid.UUID,
+	ctx context.Context, userID, contentID uuid.UUID,
 	sourceAssetID, sourceJobID, sourceModule, platform string,
 ) (*models.EditorSession, error) {
-	query := `
-		INSERT INTO editor_sessions_test (
-			user_id, content_id, source_asset_id, source_job_id, source_module, platform
-		)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING session_id, timeline, version, status,
-		          source_asset_id, source_job_id, source_module, platform,
-		          exported_asset_id, export_status, created_at, updated_at
-	`
 
-	session := &models.EditorSession{
-		UserID:    userID,
-		ContentID: contentID,
-
-		SourceAssetID: sql.NullString{
-			String: sourceAssetID,
-			Valid:  sourceAssetID != "",
-		},
-
-		SourceJobID: sql.NullString{
-			String: sourceJobID,
-			Valid:  sourceJobID != "",
-		},
-
-		SourceModule: sql.NullString{
-			String: sourceModule,
-			Valid:  sourceModule != "",
-		},
-
-		Platform: sql.NullString{
-			String: platform,
-			Valid:  platform != "",
-		},
+	// Parse source_asset_id if provided
+	var srcAssetUUID *uuid.UUID
+	if sourceAssetID != "" {
+		parsed, err := uuid.Parse(sourceAssetID)
+		if err == nil {
+			srcAssetUUID = &parsed
+		}
 	}
 
-	var timelineJSON []byte
+	query := `
+		INSERT INTO editor_sessions (
+			user_id, content_id,
+			source_asset_id, source_job_id, source_module, platform
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING ` + sessionSelectColumns
 
-	err := s.DB.QueryRowContext(ctx, query, userID, contentID, sourceAssetID, sourceJobID, sourceModule, platform).Scan(
-		&session.SessionID,
-		&timelineJSON,
-		&session.Version,
-		&session.Status,
-		&session.SourceAssetID,
-		&session.SourceJobID,
-		&session.SourceModule,
-		&session.Platform,
-		&session.ExportedAssetID,
-		&session.ExportStatus,
-		&session.CreatedAt,
-		&session.UpdatedAt,
+	row := s.DB.QueryRowContext(ctx, query,
+		userID, contentID,
+		srcAssetUUID, sourceJobID, sourceModule, platform,
 	)
+
+	session, err := scanSession(row)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(timelineJSON) > 0 {
-		json.Unmarshal(timelineJSON, &session.Timeline)
-	}
-
+	session.UserID = userID
+	session.ContentID = contentID
 	return session, nil
 }
+
+// ============================================================================
+// GET SESSION — Updated to scan new columns
+// ============================================================================
 
 // GetSession fetches a session and verifies ownership.
 // Passing userID ensures one user cannot read another user's session.
@@ -235,32 +243,13 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 	defer cancel()
 
 	query := `
-		SELECT session_id, user_id, content_id, timeline, version, status,
-		       source_asset_id, source_job_id, source_module, platform,
-		       exported_asset_id, export_status, created_at, updated_at
-		FROM editor_sessions_test
+		SELECT ` + sessionSelectColumns + `
+		FROM editor_sessions
 		WHERE session_id = $1
 	`
 
-	session := &models.EditorSession{}
-	var timelineJSON []byte
-
-	err := s.DB.QueryRowContext(ctx, query, id).Scan(
-		&session.SessionID,
-		&session.UserID,
-		&session.ContentID,
-		&timelineJSON,
-		&session.Version,
-		&session.Status,
-		&session.SourceAssetID,
-		&session.SourceJobID,
-		&session.SourceModule,
-		&session.Platform,
-		&session.ExportedAssetID,
-		&session.ExportStatus,
-		&session.CreatedAt,
-		&session.UpdatedAt,
-	)
+	row := s.DB.QueryRowContext(ctx, query, id)
+	session, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -273,12 +262,12 @@ func (s *SessionService) GetSession(id, userID uuid.UUID) (*models.EditorSession
 		return nil, ErrUnauthorized
 	}
 
-	if len(timelineJSON) > 0 {
-		json.Unmarshal(timelineJSON, &session.Timeline)
-	}
-
 	return session, nil
 }
+
+// ============================================================================
+// SAVE SESSION — Unchanged logic, same as before
+// ============================================================================
 
 // SaveSession persists timeline JSON and bumps the version counter.
 // version acts as a basic audit trail — you can see how many times a session was saved.
@@ -292,7 +281,7 @@ func (s *SessionService) SaveSession(id uuid.UUID, timeline map[string]interface
 	}
 
 	query := `
-		UPDATE editor_sessions_test
+		UPDATE editor_sessions
 		SET timeline   = $1,
 		    version    = version + 1,
 		    updated_at = NOW()
@@ -312,12 +301,16 @@ func (s *SessionService) SaveSession(id uuid.UUID, timeline map[string]interface
 	return nil
 }
 
+// ============================================================================
+// DELETE SESSION — Unchanged
+// ============================================================================
+
 // DeleteSession permanently removes a session.
 func (s *SessionService) DeleteSession(id uuid.UUID) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	_, err := s.DB.ExecContext(ctx,
-		`DELETE FROM editor_sessions_test WHERE session_id = $1`, id)
+		`DELETE FROM editor_sessions WHERE session_id = $1`, id)
 	return err
 }

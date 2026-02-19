@@ -24,71 +24,6 @@ type EditorHandler struct {
 	Storage storage.Storage
 }
 
-// ── Repurposer Integration ────────────────────────────────────────────────────
-
-// RepurposerClip represents clip metadata returned by the Repurposer backend.
-type RepurposerClip struct {
-	ClipID      string  `json:"clip_id"`
-	SourceVideo string  `json:"source_video"`
-	StartTime   float64 `json:"start_time"`
-	EndTime     float64 `json:"end_time"`
-	Duration    float64 `json:"duration"`
-	Score       float64 `json:"score"`
-	Topic       string  `json:"topic"`
-	Platform    string  `json:"platform"`
-}
-
-// RepurposerResponse is the response structure from Repurposer backend.
-type RepurposerResponse struct {
-	Clips []RepurposerClip `json:"clips"`
-}
-
-// FetchRepurposerClips retrieves clip metadata from the Repurposer backend.
-// Production implementation with timeout and proper error handling.
-func FetchRepurposerClips(contentID string) ([]RepurposerClip, error) {
-	// Get Repurposer backend URL from environment
-	repurposerURL := os.Getenv("REPURPOSER_BACKEND_URL")
-	if repurposerURL == "" {
-		repurposerURL = "http://localhost:8085" // Dev fallback
-	}
-
-	// Build request URL
-	url := fmt.Sprintf("%s/api/repurposer/clips/%s", repurposerURL, contentID)
-
-	// Create context with timeout — prevents hanging on slow Repurposer backend
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Create HTTP request with context
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Execute request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch clips from Repurposer: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check HTTP status
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Repurposer returned status %d", resp.StatusCode)
-	}
-
-	// Decode response
-	var repurposerResp RepurposerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&repurposerResp); err != nil {
-		return nil, fmt.Errorf("failed to decode Repurposer response: %w", err)
-	}
-
-	return repurposerResp.Clips, nil
-}
-
-// ── Handlers ───────────────────────────────────────────────────────────────────
-
 // getUserID reads the user identity injected by the API gateway.
 //
 // Production flow:
@@ -281,32 +216,44 @@ func (h *EditorHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-func parseUUIDParam(r *http.Request, param string) (uuid.UUID, error) {
-	// uuid.Parse returns an error instead of silently returning uuid.Nil
-	return uuid.Parse(mux.Vars(r)[param])
-}
-
-func respondJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func respondError(w http.ResponseWriter, status int, message string) {
-	respondJSON(w, status, map[string]string{"error": message})
-}
+// ============================================================================
+// CreateSessionFromClip — Enhanced for Repurposer / Content Hub integration
+// ============================================================================
+//
+// Creates an editing session with a clip pre-loaded on the timeline.
+//
+// Called by:
+//   - Repurposer frontend: user clicks "Edit" on a repurposed clip
+//   - Content Hub frontend: user clicks "Edit" on any video asset (future)
+//
+// Key design:
+//   - When source_asset_id is provided, it is used as content_id
+//     → FindOrCreate correctly reuses sessions (click Edit twice = same session)
+//   - Source context (job ID, module, platform) is stored for lineage tracking
+//   - The timeline is pre-populated with the clip on a video track
+//
+// Request body:
+//
+//	{
+//	    "clip_id":          "clip_003",
+//	    "clip_url":         "https://cdn.example.com/clip_003_1080x1920.mp4",
+//	    "duration":         28.5,
+//	    "source_asset_id":  "uuid-of-content-hub-asset",   // optional
+//	    "source_job_id":    "job_1737423456_1234",          // optional
+//	    "source_module":    "repurposer",                   // optional
+//	    "platform":         "tiktok"                        // optional
+//	}
 func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
-		ClipID        string  `json:"clip_id"`
-		ClipURL       string  `json:"clip_url"`
-		Duration      float64 `json:"duration"`
-		SourceAssetID string  `json:"source_asset_id,omitempty"`
-		SourceJobID   string  `json:"source_job_id,omitempty"`
-		SourceModule  string  `json:"source_module,omitempty"`
-		Platform      string  `json:"platform,omitempty"`
+		ClipID   string  `json:"clip_id"`
+		ClipURL  string  `json:"clip_url"`
+		Duration float64 `json:"duration"`
+		// Source context for lineage tracking
+		SourceAssetID string `json:"source_asset_id"` // Content Hub asset UUID
+		SourceJobID   string `json:"source_job_id"`   // e.g. "job_1737423456_1234"
+		SourceModule  string `json:"source_module"`   // "repurposer" | "content_hub"
+		Platform      string `json:"platform"`        // "tiktok" | "ig_reels" etc.
 	}
 
 	// Decode request
@@ -333,30 +280,51 @@ func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate new content ID for this clip session
-	contentID := uuid.New()
+	// Determine content_id:
+	// - If source_asset_id provided → use it (enables session reuse for same clip)
+	// - Otherwise → generate a new UUID
+	var contentID uuid.UUID
+	if req.SourceAssetID != "" {
+		parsed, parseErr := uuid.Parse(req.SourceAssetID)
+		if parseErr == nil {
+			contentID = parsed
+		} else {
+			contentID = uuid.New()
+		}
+	} else {
+		contentID = uuid.New()
+	}
 
-	// Create session with source tracking if provided
-	var session *models.EditorSession
-	if req.SourceAssetID != "" || req.SourceJobID != "" {
-		session, err = h.Service.FindOrCreateSessionWithSource(
+	// Create or reuse session
+	// Both paths return *models.EditorSession — use source-aware path when context exists
+	hasSourceContext := req.SourceAssetID != "" || req.SourceJobID != "" || req.SourceModule != ""
+
+	var editorSession *models.EditorSession
+
+	if hasSourceContext {
+		s, e := h.Service.FindOrCreateSessionWithSource(
 			userID, contentID,
 			req.SourceAssetID, req.SourceJobID, req.SourceModule, req.Platform,
 		)
+		if e != nil {
+			log.Println("CreateSessionFromClip error:", e)
+			respondError(w, http.StatusInternalServerError, "failed to create session")
+			return
+		}
+		editorSession = s
 	} else {
-		session, err = h.Service.FindOrCreateSession(userID, contentID)
-	}
-
-	if err != nil {
-		log.Println("CreateSessionFromClip error:", err)
-		respondError(w, http.StatusInternalServerError, "failed to create session")
-		return
+		s, e := h.Service.FindOrCreateSession(userID, contentID)
+		if e != nil {
+			log.Println("CreateSessionFromClip error:", e)
+			respondError(w, http.StatusInternalServerError, "failed to create session")
+			return
+		}
+		editorSession = s
 	}
 
 	// Create timeline with clip preloaded
 	timeline := map[string]interface{}{
-		"session_type": "standard",
-		"duration":     req.Duration,
+		"duration": req.Duration,
 		"tracks": []interface{}{
 			map[string]interface{}{
 				"type":    "video",
@@ -376,7 +344,7 @@ func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Req
 	}
 
 	// Save timeline
-	err = h.Service.SaveSession(session.SessionID, timeline)
+	err = h.Service.SaveSession(editorSession.SessionID, timeline)
 	if err != nil {
 		log.Println("SaveSession error:", err)
 		respondError(w, http.StatusInternalServerError, "failed to save session timeline")
@@ -384,7 +352,7 @@ func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Req
 	}
 
 	// Fetch updated session with timeline
-	updatedSession, err := h.Service.GetSession(session.SessionID, userID)
+	updatedSession, err := h.Service.GetSession(editorSession.SessionID, userID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to fetch updated session")
 		return
@@ -394,9 +362,114 @@ func (h *EditorHandler) CreateSessionFromClip(w http.ResponseWriter, r *http.Req
 	respondJSON(w, http.StatusOK, updatedSession)
 }
 
-// CreateHighlightSession creates a highlight reel session from multiple clips.
-// Used by Phase 2 repurposer integration to create multi-clip highlight reels.
-// Fetches full clip metadata from Repurposer backend and builds proper timeline.
+// ============================================================================
+// ExportSession — Phase 2 stub
+// ============================================================================
+//
+// When implemented, this will:
+//   1. Take the edited timeline from the session
+//   2. Render the final video via FFmpeg
+//   3. Upload to S3
+//   4. Create an asset in Content Hub (assets table)
+//   5. Record lineage: source_asset → exported_asset (relationship_type: "edited_from")
+//   6. Update session.exported_asset_id and session.export_status
+//
+// POST /api/v1/sessions/{id}/export
+func (h *EditorHandler) ExportSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := parseUUIDParam(r, "id")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid session id — must be a UUID")
+		return
+	}
+
+	userID, err := getUserID(r)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid X-User-ID header")
+		return
+	}
+
+	// Verify session exists and belongs to user
+	session, err := h.Service.GetSession(sessionID, userID)
+	if err != nil {
+		if err == service.ErrSessionNotFound {
+			respondError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if err == service.ErrUnauthorized {
+			respondError(w, http.StatusForbidden, "you do not own this session")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to get session")
+		return
+	}
+
+	_ = session // Will be used in Phase 2
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     "coming_soon",
+		"message":    "Export to Content Hub will be available in Phase 2",
+		"session_id": sessionID.String(),
+	})
+}
+
+// ============================================================================
+// Phase 2: Highlight Reel Creation + Repurposer Integration
+// ============================================================================
+
+// RepurposerClip represents clip metadata returned by the Repurposer backend.
+type RepurposerClip struct {
+	ClipID      string  `json:"clip_id"`
+	SourceVideo string  `json:"source_video"`
+	StartTime   float64 `json:"start_time"`
+	EndTime     float64 `json:"end_time"`
+	Duration    float64 `json:"duration"`
+	Score       float64 `json:"score"`
+	Topic       string  `json:"topic"`
+	Platform    string  `json:"platform"`
+}
+
+// RepurposerResponse is the response structure from Repurposer backend.
+type RepurposerResponse struct {
+	Clips []RepurposerClip `json:"clips"`
+}
+
+// FetchRepurposerClips retrieves clip metadata from the Repurposer backend.
+func FetchRepurposerClips(contentID string) ([]RepurposerClip, error) {
+	repurposerURL := os.Getenv("REPURPOSER_BACKEND_URL")
+	if repurposerURL == "" {
+		repurposerURL = "http://localhost:8083"
+	}
+
+	url := fmt.Sprintf("%s/api/repurposer/clips/%s", repurposerURL, contentID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch clips from Repurposer: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Repurposer returned status %d", resp.StatusCode)
+	}
+
+	var repurposerResp RepurposerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&repurposerResp); err != nil {
+		return nil, fmt.Errorf("failed to decode Repurposer response: %w", err)
+	}
+
+	return repurposerResp.Clips, nil
+}
+
+// CreateHighlightSession creates a highlight reel session from selected clips.
 func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ContentID      string   `json:"content_id"`
@@ -408,43 +481,36 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		Platform       string   `json:"platform,omitempty"`
 	}
 
-	// Decode request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	// Validate input
 	if req.ContentID == "" {
 		respondError(w, http.StatusBadRequest, "content_id is required")
 		return
 	}
-
 	if len(req.ClipIDs) == 0 {
 		respondError(w, http.StatusBadRequest, "clip_ids cannot be empty")
 		return
 	}
-
 	if req.TargetDuration <= 0 {
 		respondError(w, http.StatusBadRequest, "target_duration must be greater than 0")
 		return
 	}
 
-	// Get authenticated user
 	userID, err := getUserID(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "invalid user")
 		return
 	}
 
-	// Parse content ID
 	contentID, err := uuid.Parse(req.ContentID)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "content_id must be a valid UUID")
 		return
 	}
 
-	// Fetch clip metadata from Repurposer backend
 	repurposerClips, err := FetchRepurposerClips(req.ContentID)
 	if err != nil {
 		log.Printf("Failed to fetch clips from Repurposer for content_id=%s: %v", req.ContentID, err)
@@ -452,19 +518,16 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Build clip lookup map for O(1) access
 	clipMap := make(map[string]RepurposerClip)
 	for _, clip := range repurposerClips {
 		clipMap[clip.ClipID] = clip
 	}
 
-	// Build timeline clips array with full metadata
 	timelineClips := make([]interface{}, 0, len(req.ClipIDs))
 	for _, clipID := range req.ClipIDs {
 		clip, found := clipMap[clipID]
 		if !found {
 			log.Printf("Warning: clip_id=%s not found in Repurposer response", clipID)
-			// Skip missing clips instead of failing — allows partial success
 			continue
 		}
 
@@ -482,13 +545,11 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		})
 	}
 
-	// Ensure at least one clip was matched
 	if len(timelineClips) == 0 {
 		respondError(w, http.StatusBadRequest, "no matching clips found in Repurposer response")
 		return
 	}
 
-	// Create session with source tracking
 	session, err := h.Service.FindOrCreateSessionWithSource(
 		userID, contentID,
 		req.SourceAssetID, req.SourceJobID, req.SourceModule, req.Platform,
@@ -499,7 +560,6 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Build complete highlight reel timeline with full clip metadata
 	timeline := map[string]interface{}{
 		"session_type":    "highlight_reel",
 		"target_duration": req.TargetDuration,
@@ -511,7 +571,6 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		},
 	}
 
-	// Save timeline
 	err = h.Service.SaveSession(session.SessionID, timeline)
 	if err != nil {
 		log.Println("SaveSession error:", err)
@@ -519,51 +578,28 @@ func (h *EditorHandler) CreateHighlightSession(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Fetch updated session with timeline
 	updatedSession, err := h.Service.GetSession(session.SessionID, userID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to fetch updated session")
 		return
 	}
 
-	// Return updated session
 	respondJSON(w, http.StatusOK, updatedSession)
 }
 
-// ExportSession initiates export for a completed editing session.
-// Stub implementation — actual export logic will be added in Phase 3.
-func (h *EditorHandler) ExportSession(w http.ResponseWriter, r *http.Request) {
-	sessionID, err := parseUUIDParam(r, "id")
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "invalid session id — must be a UUID")
-		return
-	}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-	userID, err := getUserID(r)
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "invalid X-User-ID header")
-		return
-	}
+func parseUUIDParam(r *http.Request, param string) (uuid.UUID, error) {
+	// uuid.Parse returns an error instead of silently returning uuid.Nil
+	return uuid.Parse(mux.Vars(r)[param])
+}
 
-	// Verify session ownership
-	session, err := h.Service.GetSession(sessionID, userID)
-	if err != nil {
-		if err == service.ErrSessionNotFound {
-			respondError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		if err == service.ErrUnauthorized {
-			respondError(w, http.StatusForbidden, "you do not own this session")
-			return
-		}
-		respondError(w, http.StatusInternalServerError, "failed to get session")
-		return
-	}
+func respondJSON(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
 
-	// Stub response — Phase 3 will implement actual export
-	respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "export started",
-		"session_id":    session.SessionID,
-		"export_status": "processing",
-	})
+func respondError(w http.ResponseWriter, status int, message string) {
+	respondJSON(w, status, map[string]string{"error": message})
 }

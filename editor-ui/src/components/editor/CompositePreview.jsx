@@ -909,6 +909,45 @@ export default function CompositePreview() {
         Timeline: {playheadPosition.toFixed(1)}s
       </div>
 
+      {/* Fullscreen button */}
+      <button
+        onClick={() => {
+          if (previewRef.current) {
+            if (document.fullscreenElement) {
+              document.exitFullscreen()
+            } else {
+              previewRef.current.requestFullscreen().catch(err => {
+                console.warn("Fullscreen failed:", err)
+              })
+            }
+          }
+        }}
+        style={{
+          position: "absolute",
+          top: "20px",
+          right: "20px",
+          background: "rgba(0,0,0,0.8)",
+          color: "white",
+          border: "1px solid rgba(255,255,255,0.2)",
+          padding: "8px 14px",
+          borderRadius: "8px",
+          fontSize: "13px",
+          fontWeight: "600",
+          cursor: "pointer",
+          zIndex: 20,
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+          transition: "all 0.2s"
+        }}
+        onMouseEnter={(e) => e.target.style.background = "rgba(59,130,246,0.6)"}
+        onMouseLeave={(e) => e.target.style.background = "rgba(0,0,0,0.8)"}
+        title="Toggle Fullscreen"
+      >
+        ⛶ Fullscreen
+      </button>
+
       {allVideoClips.length === 0 && (
         <div style={{ 
           position: "absolute", 

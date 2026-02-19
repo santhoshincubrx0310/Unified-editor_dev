@@ -1,15 +1,18 @@
 // src/components/editor/ClipLibraryPanel.jsx
 import { useState, useEffect } from "react"
-import { fetchClips } from "../../api/clipApi"
+import { fetchClips } from "../../api/editorClipApi"
 
-export default function ClipLibraryPanel({ contentId, onClipDragStart }) {
+export default function ClipLibraryPanel({ contentId, jobId, onClipDragStart }) {
   const [clips, setClips] = useState([])
+  const [hubClips, setHubClips] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [filterPlatform, setFilterPlatform] = useState("all")
   const [sortBy, setSortBy] = useState("score")
   const [hoveredClip, setHoveredClip] = useState(null)
+  const [sourceTab, setSourceTab] = useState("recent") // "recent" | "hub"
 
+  // Load recent clips from repurposer
   useEffect(() => {
     if (!contentId) return
 
@@ -18,7 +21,17 @@ export default function ClipLibraryPanel({ contentId, onClipDragStart }) {
       setError(null)
       try {
         const fetchedClips = await fetchClips(contentId)
-        setClips(fetchedClips)
+        // If jobId provided, filter to only clips from that job
+        if (jobId) {
+          const jobFiltered = fetchedClips.filter(c =>
+            c.clip_id && c.clip_id.startsWith(jobId.replace('job_', '').substring(0, 10))
+            || c.clip_id && c.clip_id.includes(jobId)
+          )
+          // Use filtered if we got results, otherwise show all
+          setClips(jobFiltered.length > 0 ? jobFiltered : fetchedClips)
+        } else {
+          setClips(fetchedClips)
+        }
       } catch (err) {
         console.error("Failed to fetch clips:", err)
         setError(err.message)
@@ -28,9 +41,50 @@ export default function ClipLibraryPanel({ contentId, onClipDragStart }) {
     }
 
     loadClips()
-  }, [contentId])
+  }, [contentId, jobId])
 
-  const filteredAndSortedClips = clips
+  // Load Content Hub clips (video assets) when tab switches
+  useEffect(() => {
+    if (sourceTab !== "hub" || hubClips.length > 0) return
+
+    async function loadHubClips() {
+      setLoading(true)
+      try {
+        const res = await fetch("/api/assets", {
+          headers: { "Content-Type": "application/json" }
+        })
+        if (res.ok) {
+          const data = await res.json()
+          const assets = (data.assets || data || []).filter(a =>
+            a.content_type && (a.content_type.startsWith("video/") || a.content_type.includes("mp4"))
+            || a.name && (a.name.endsWith(".mp4") || a.name.endsWith(".mov") || a.name.endsWith(".webm"))
+          )
+          const mapped = assets.map((a, idx) => ({
+            clip_id: a.id || ("hub_" + idx),
+            source_video: a.cloudfront_url || a.s3_url || "",
+            s3_url: a.cloudfront_url || a.s3_url || "",
+            duration: a.duration_seconds || 0,
+            platform: "content_hub",
+            score: 0,
+            topic: a.name || "Untitled",
+            title: a.name || "Untitled",
+            asset_id: a.id || "",
+          }))
+          setHubClips(mapped)
+        }
+      } catch (err) {
+        console.error("Failed to load Content Hub clips:", err)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadHubClips()
+  }, [sourceTab, hubClips.length])
+
+  const activeClips = sourceTab === "recent" ? clips : hubClips
+
+  const filteredAndSortedClips = activeClips
     .filter(clip => {
       if (filterPlatform === "all") return true
       return clip.platform === filterPlatform
@@ -44,7 +98,7 @@ export default function ClipLibraryPanel({ contentId, onClipDragStart }) {
       }
     })
 
-  const platforms = ["all", ...new Set(clips.map(c => c.platform).filter(Boolean))]
+  const platforms = ["all", ...new Set(activeClips.map(c => c.platform).filter(Boolean))]
 
   const handleDragStart = (e, clip) => {
     e.dataTransfer.effectAllowed = "copy"
@@ -148,6 +202,53 @@ export default function ClipLibraryPanel({ contentId, onClipDragStart }) {
               </span>
             </span>
           )}
+        </div>
+
+        {/* Source Tabs: Recent Clips | Content Hub */}
+        <div style={{
+          display: 'flex',
+          gap: '4px',
+          padding: '4px',
+          background: 'rgba(255,255,255,0.04)',
+          borderRadius: '8px',
+          margin: '0 12px 8px 12px'
+        }}>
+          <button
+            onClick={() => { setSourceTab("recent"); setFilterPlatform("all"); }}
+            style={{
+              flex: 1,
+              padding: '8px 10px',
+              borderRadius: '6px',
+              border: 'none',
+              fontSize: '12px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              background: sourceTab === 'recent' ? 'rgba(34, 211, 238, 0.25)' : 'transparent',
+              color: sourceTab === 'recent' ? '#22d3ee' : 'rgba(255,255,255,0.5)',
+              borderBottom: sourceTab === 'recent' ? '2px solid #22d3ee' : '2px solid transparent'
+            }}
+          >
+            Recent Clips ({clips.length})
+          </button>
+          <button
+            onClick={() => { setSourceTab("hub"); setFilterPlatform("all"); }}
+            style={{
+              flex: 1,
+              padding: '8px 10px',
+              borderRadius: '6px',
+              border: 'none',
+              fontSize: '12px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              background: sourceTab === 'hub' ? 'rgba(59, 130, 246, 0.25)' : 'transparent',
+              color: sourceTab === 'hub' ? '#3b82f6' : 'rgba(255,255,255,0.5)',
+              borderBottom: sourceTab === 'hub' ? '2px solid #3b82f6' : '2px solid transparent'
+            }}
+          >
+            Content Hub ({hubClips.length})
+          </button>
         </div>
 
         {/* Filter Controls */}

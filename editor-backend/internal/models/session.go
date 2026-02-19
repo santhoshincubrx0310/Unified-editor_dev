@@ -1,7 +1,7 @@
+// internal/models/session.go
 package models
 
 import (
-	"database/sql"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,13 +17,16 @@ type EditorSession struct {
 	Version int    `json:"version"`
 	Status  string `json:"status"`
 
-	// Phase 2: Repurposer integration fields
-	SourceAssetID   sql.NullString `json:"source_asset_id,omitempty"`
-	SourceJobID     sql.NullString `json:"source_job_id,omitempty"`
-	SourceModule    sql.NullString `json:"source_module,omitempty"`
-	Platform        sql.NullString `json:"platform,omitempty"`
-	ExportedAssetID sql.NullString `json:"exported_asset_id,omitempty"`
-	ExportStatus    sql.NullString `json:"export_status,omitempty"`
+	// Source context — tracks where this editing session originated
+	// Populated when a clip is sent to the editor from Repurposer or Content Hub
+	SourceAssetID *uuid.UUID `json:"source_asset_id,omitempty"`  // Content Hub asset being edited
+	SourceJobID   string     `json:"source_job_id,omitempty"`    // Repurposer job ID (e.g. "job_1737423456_1234")
+	SourceModule  string     `json:"source_module,omitempty"`    // "repurposer" | "content_hub" | "stv"
+	Platform      string     `json:"platform,omitempty"`         // "tiktok" | "ig_reels" | "youtube_shorts" | "linkedin"
+
+	// Export tracking — what happened after editing (Phase 2)
+	ExportedAssetID *uuid.UUID `json:"exported_asset_id,omitempty"` // Content Hub asset created by export
+	ExportStatus    string     `json:"export_status,omitempty"`     // "" | "rendering" | "uploading" | "completed" | "failed"
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

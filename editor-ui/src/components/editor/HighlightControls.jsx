@@ -1,6 +1,6 @@
 // src/components/editor/HighlightControls.jsx
 import { useState } from "react"
-import { createHighlightSession } from "../../api/clipApi"
+import { createHighlightSession, fetchClips } from "../../api/editorClipApi"
 import { useEditorStore } from "../../store/editorStore"
 
 export default function HighlightControls({ contentId, onSessionCreated }) {
@@ -8,23 +8,25 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
   const [targetDuration, setTargetDuration] = useState(60)
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState(null)
+  const [mode, setMode] = useState("manual") // "manual" | "auto"
 
   const timeline = useEditorStore((s) => s.timeline)
+  const addTrack = useEditorStore((s) => s.addTrack)
+  const addClipFromLibrary = useEditorStore((s) => s.addClipFromLibrary)
 
-  const handleCreateHighlight = async () => {
+  // Manual: use clips already on the timeline
+  const handleCreateManual = async () => {
     if (!contentId) {
       setError("No content ID provided")
       return
     }
 
-    // Collect all clip IDs from the current timeline
     const clipIds = []
     for (const track of timeline.tracks) {
       if (track.type === "video" && track.clips) {
         for (const clip of track.clips) {
-          if (clip.clip_id) {
-            clipIds.push(clip.clip_id)
-          }
+          const id = clip.original_clip_id || clip.clip_id
+          if (id) clipIds.push(id)
         }
       }
     }
@@ -34,31 +36,15 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
       return
     }
 
-    if (targetDuration <= 0) {
-      setError("Target duration must be greater than 0")
-      return
-    }
-
     setIsCreating(true)
     setError(null)
 
     try {
       const session = await createHighlightSession(
-        contentId,
-        clipIds,
-        targetDuration,
-        {
-          sourceModule: "editor-ui",
-          platform: "web"
-        }
+        contentId, clipIds, targetDuration,
+        { sourceModule: "editor-ui", platform: "web" }
       )
-
-      // Notify parent component
-      if (onSessionCreated) {
-        onSessionCreated(session)
-      }
-
-      // Reset state
+      if (onSessionCreated) onSessionCreated(session)
       setIsHighlightMode(false)
       setError(null)
     } catch (err) {
@@ -66,6 +52,86 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
       setError(err.message)
     } finally {
       setIsCreating(false)
+    }
+  }
+
+  // Auto: fetch all clips, pick best ones by score, populate timeline
+  const handleAutoGenerate = async () => {
+    if (!contentId) {
+      setError("No content ID provided")
+      return
+    }
+
+    setIsCreating(true)
+    setError(null)
+
+    try {
+      // Fetch all available clips
+      const allClips = await fetchClips(contentId)
+      if (!allClips || allClips.length === 0) {
+        setError("No clips available for auto-generation")
+        return
+      }
+
+      // Sort by score (highest first) for best quality selection
+      const sorted = [...allClips].sort((a, b) => (b.score || 0) - (a.score || 0))
+
+      // Pick clips until we hit target duration
+      const selected = []
+      let totalDuration = 0
+      for (const clip of sorted) {
+        const clipDur = clip.duration || (clip.end_time - clip.start_time) || 5
+        if (totalDuration + clipDur <= targetDuration) {
+          selected.push(clip)
+          totalDuration += clipDur
+        }
+        // Stop if we've reached the target
+        if (totalDuration >= targetDuration * 0.9) break
+      }
+
+      if (selected.length === 0) {
+        setError("Could not select clips for the target duration")
+        return
+      }
+
+      // Ensure video track exists
+      const hasVideoTrack = timeline.tracks.some(t => t.type === "video")
+      if (!hasVideoTrack) {
+        addTrack("video")
+      }
+
+      // Wait a tick for track to be added to store
+      await new Promise(r => setTimeout(r, 50))
+
+      // Get the video track ID
+      const currentTimeline = useEditorStore.getState().timeline
+      const videoTrack = currentTimeline.tracks.find(t => t.type === "video")
+      if (!videoTrack) {
+        setError("Failed to create video track")
+        return
+      }
+
+      // Add selected clips to timeline
+      for (const clip of selected) {
+        addClipFromLibrary(videoTrack.track_id, clip)
+      }
+
+      setError(null)
+      setIsHighlightMode(false)
+
+    } catch (err) {
+      console.error("Auto-generate failed:", err)
+      setError(err.message)
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  const handleCreate = () => {
+    if (mode === "auto") {
+      handleAutoGenerate()
+    } else {
+      handleCreateManual()
     }
   }
 
@@ -87,6 +153,37 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
 
       {isHighlightMode && (
         <div style={styles.controlsSection}>
+          {/* Mode selector */}
+          <div style={styles.modeSelector}>
+            <button
+              onClick={() => setMode("manual")}
+              style={{
+                ...styles.modeButton,
+                background: mode === "manual" ? 'rgba(59, 130, 246, 0.4)' : 'rgba(255,255,255,0.06)',
+                borderColor: mode === "manual" ? '#3b82f6' : 'rgba(255,255,255,0.15)',
+              }}
+            >
+              ✋ Manual
+            </button>
+            <button
+              onClick={() => setMode("auto")}
+              style={{
+                ...styles.modeButton,
+                background: mode === "auto" ? 'rgba(34, 211, 238, 0.4)' : 'rgba(255,255,255,0.06)',
+                borderColor: mode === "auto" ? '#22d3ee' : 'rgba(255,255,255,0.15)',
+              }}
+            >
+              ⚡ Auto-Generate
+            </button>
+          </div>
+
+          <div style={styles.modeDescription}>
+            {mode === "manual"
+              ? "Uses clips currently on your timeline to create a highlight session."
+              : "Automatically selects the best-scoring clips to fill your target duration."
+            }
+          </div>
+
           <div style={styles.inputGroup}>
             <label style={styles.inputLabel}>
               Target Duration (seconds):
@@ -102,15 +199,23 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
           </div>
 
           <button
-            onClick={handleCreateHighlight}
+            onClick={handleCreate}
             disabled={isCreating}
             style={{
               ...styles.createButton,
+              background: mode === "auto"
+                ? 'linear-gradient(135deg, #22d3ee, #0891b2)'
+                : 'linear-gradient(135deg, #3b82f6, #2563eb)',
               opacity: isCreating ? 0.5 : 1,
               cursor: isCreating ? 'not-allowed' : 'pointer'
             }}
           >
-            {isCreating ? "Creating..." : "Create Highlight Session"}
+            {isCreating
+              ? "Creating..."
+              : mode === "auto"
+                ? "⚡ Auto-Generate Highlight"
+                : "Create Highlight Session"
+            }
           </button>
 
           {error && (
@@ -118,10 +223,6 @@ export default function HighlightControls({ contentId, onSessionCreated }) {
               ⚠️ {error}
             </div>
           )}
-
-          <div style={styles.infoText}>
-            This will create a new highlight reel session with all clips currently in your timeline.
-          </div>
         </div>
       )}
     </div>
@@ -166,6 +267,27 @@ const styles = {
     flexDirection: 'column',
     gap: '12px'
   },
+  modeSelector: {
+    display: 'flex',
+    gap: '8px'
+  },
+  modeButton: {
+    flex: 1,
+    padding: '10px 14px',
+    border: '1px solid',
+    borderRadius: '8px',
+    color: '#FFFFFF',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s'
+  },
+  modeDescription: {
+    fontSize: '11px',
+    color: 'rgba(255,255,255,0.5)',
+    lineHeight: 1.5,
+    fontStyle: 'italic'
+  },
   inputGroup: {
     display: 'flex',
     flexDirection: 'column',
@@ -189,7 +311,6 @@ const styles = {
   },
   createButton: {
     padding: '12px 20px',
-    background: 'linear-gradient(135deg, #3b82f6, #2563eb)',
     border: 'none',
     borderRadius: '8px',
     color: '#FFFFFF',
@@ -207,10 +328,5 @@ const styles = {
     color: '#fca5a5',
     fontSize: '12px',
     fontWeight: '500'
-  },
-  infoText: {
-    fontSize: '11px',
-    color: 'rgba(255,255,255,0.5)',
-    lineHeight: 1.5
   }
 }

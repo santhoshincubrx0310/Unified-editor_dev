@@ -92,21 +92,28 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
+		w.Write([]byte(`{"status":"ok","service":"unified-editor","port":"8087"}`))
 	}).Methods("GET")
 
 	// API routes — versioned so parent product can call /api/v1/* without conflicts
 	api := r.PathPrefix("/api/v1").Subrouter()
+
+	// Session management (existing)
 	api.HandleFunc("/sessions", editorHandler.CreateSession).Methods("POST")
 	api.HandleFunc("/sessions/{id}", editorHandler.GetSession).Methods("GET")
 	api.HandleFunc("/sessions/{id}", editorHandler.SaveSession).Methods("PUT")
 	api.HandleFunc("/sessions/{id}", editorHandler.DeleteSession).Methods("DELETE")
+
+	// File upload (existing)
 	api.HandleFunc("/upload", editorHandler.UploadFile).Methods("POST")
+
+	// Clip-to-editor session (existing endpoint, enhanced with source context)
 	api.HandleFunc("/sessions/from-clip", editorHandler.CreateSessionFromClip).Methods("POST")
 
-	// Phase 2: Repurposer integration endpoints
+	// Export to Content Hub (Phase 2 — stub for now)
+	api.HandleFunc("/sessions/{id}/export", editorHandler.ExportSession).Methods("POST")
+	// Highlight reel creation (Phase 2)
 	api.HandleFunc("/highlight/create", editorHandler.CreateHighlightSession).Methods("POST")
-	api.HandleFunc("/export/{id}", editorHandler.ExportSession).Methods("POST")
 
 	// Serve local uploads — in production, S3 serves files directly (this route unused)
 	r.PathPrefix("/uploads/").Handler(
@@ -134,7 +141,7 @@ func main() {
 	// This protects your service under load.
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8087"
+		port = "8087" // Unified Editor — avoids conflict with Repurposer (8083)
 	}
 
 	srv := &http.Server{
@@ -152,7 +159,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Editor service running on :%s", port)
+		log.Printf("Unified Editor service running on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server error:", err)
 		}
